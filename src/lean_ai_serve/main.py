@@ -1,0 +1,128 @@
+"""FastAPI application entrypoint with lifespan management."""
+
+from __future__ import annotations
+
+import logging
+import time
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI
+
+from lean_ai_serve import __version__
+from lean_ai_serve.config import get_settings, load_settings, set_settings
+from lean_ai_serve.db import Database
+from lean_ai_serve.engine.process import ProcessManager
+from lean_ai_serve.engine.proxy import close_proxy_client
+from lean_ai_serve.engine.router import Router
+from lean_ai_serve.models.downloader import ModelDownloader
+from lean_ai_serve.models.registry import ModelRegistry
+from lean_ai_serve.models.schemas import ModelState
+from lean_ai_serve.security.audit import AuditLogger
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup and shutdown lifecycle."""
+    settings = get_settings()
+    logger.info("lean-ai-serve %s starting", __version__)
+
+    # --- Startup ---
+
+    # Database
+    cache_dir = Path(settings.cache.directory)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    db = Database(cache_dir / "lean_ai_serve.db")
+    await db.connect()
+    app.state.db = db
+
+    # Model registry
+    registry = ModelRegistry(db)
+    await registry.sync_from_config(settings.models)
+    app.state.registry = registry
+
+    # Audit logger
+    audit = AuditLogger(db)
+    await audit.initialize()
+    app.state.audit = audit
+
+    # Model downloader
+    downloader = ModelDownloader()
+    app.state.downloader = downloader
+
+    # Process manager
+    pm = ProcessManager()
+    app.state.process_manager = pm
+
+    # Router
+    router = Router(registry, pm)
+    app.state.router = router
+
+    # Timing
+    app.state.start_time = time.monotonic()
+
+    # Autoload models
+    for name, config in settings.models.items():
+        if config.autoload:
+            model = await registry.get_model(name)
+            if model and model.state == ModelState.DOWNLOADED:
+                logger.info("Autoloading model: %s", name)
+                model_path = downloader.get_local_path(config.source)
+                if model_path:
+                    try:
+                        await registry.set_state(name, ModelState.LOADING)
+                        info = await pm.start(name, config, model_path)
+                        await registry.set_state(
+                            name, ModelState.LOADED, port=info.port, pid=info.pid
+                        )
+                    except Exception:
+                        logger.exception("Failed to autoload '%s'", name)
+                        await registry.set_state(
+                            name, ModelState.ERROR, error_message="Autoload failed"
+                        )
+
+    logger.info("lean-ai-serve ready on %s:%d", settings.server.host, settings.server.port)
+
+    yield
+
+    # --- Shutdown ---
+    logger.info("lean-ai-serve shutting down")
+    await pm.close()
+    await close_proxy_client()
+    await db.close()
+    logger.info("Shutdown complete")
+
+
+def create_app(config_path: str | None = None) -> FastAPI:
+    """Create and configure the FastAPI application."""
+    if config_path:
+        settings = load_settings(config_path)
+        set_settings(settings)
+
+    app = FastAPI(
+        title="lean-ai-serve",
+        description="Secure vLLM inference, model management & fine-tuning server",
+        version=__version__,
+        lifespan=lifespan,
+    )
+
+    # Register routers
+    from lean_ai_serve.api.audit_routes import router as audit_router
+    from lean_ai_serve.api.health import router as health_router
+    from lean_ai_serve.api.keys import router as keys_router
+    from lean_ai_serve.api.models import router as models_router
+    from lean_ai_serve.api.openai_compat import router as openai_router
+
+    app.include_router(health_router)
+    app.include_router(openai_router)
+    app.include_router(models_router)
+    app.include_router(keys_router)
+    app.include_router(audit_router)
+
+    return app
+
+
+# Default app instance for uvicorn
+app = create_app()

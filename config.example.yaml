@@ -1,0 +1,97 @@
+server:
+  host: "0.0.0.0"
+  port: 8420
+  tls:
+    enabled: false
+    cert_file: ""
+    key_file: ""
+
+security:
+  mode: "api_key"                    # api_key, ldap, oidc, ldap+api_key
+  jwt_secret: ""                     # Auto-generated if empty (sessions won't survive restarts)
+  jwt_expiry_hours: 8.0
+
+  # LDAP/Active Directory (when mode includes "ldap")
+  ldap:
+    server_url: "ldaps://ad.corp.com:636"
+    bind_dn: "CN=svc-lean-ai,OU=ServiceAccounts,DC=corp,DC=com"
+    bind_password_env: "LEAN_AI_LDAP_BIND_PASSWORD"
+    user_search_base: "OU=Users,DC=corp,DC=com"
+    user_search_filter: "(sAMAccountName={username})"
+    group_search_base: "OU=Groups,DC=corp,DC=com"
+    group_role_mapping:
+      "CN=AI-Admins,OU=Groups,DC=corp,DC=com": "admin"
+      "CN=AI-ModelManagers,OU=Groups,DC=corp,DC=com": "model-manager"
+      "CN=AI-Trainers,OU=Groups,DC=corp,DC=com": "trainer"
+      "CN=AI-Users,OU=Groups,DC=corp,DC=com": "user"
+      "CN=AI-Auditors,OU=Groups,DC=corp,DC=com": "auditor"
+    default_role: "user"
+    cache_ttl: 300
+    connection_pool_size: 5
+
+  # OIDC (when mode includes "oidc")
+  oidc:
+    issuer_url: ""
+    client_id: ""
+    audience: ""
+    roles_claim: "realm_access.roles"
+
+  # Content filtering for PHI detection
+  content_filtering:
+    enabled: false
+    patterns:
+      - name: "SSN"
+        pattern: '\b\d{3}-\d{2}-\d{4}\b'
+        action: "warn"
+      - name: "MRN"
+        pattern: '\bMRN[:\s]?\d{6,}\b'
+        action: "warn"
+
+audit:
+  enabled: true
+  log_prompts: true
+  log_prompts_hash_only: false       # Store SHA-256 hash instead of full content
+  retention_days: 2190               # 6 years (HIPAA minimum)
+  storage: "sqlite"
+
+encryption:
+  at_rest:
+    enabled: false
+    key_source: "file"               # file, env, vault
+    key_file: ""
+    key_env_var: "LEAN_AI_ENCRYPTION_KEY"
+
+cache:
+  directory: "~/.cache/lean-ai-serve"
+  huggingface_token: ""              # Or set HF_TOKEN env var
+
+defaults:
+  gpu_memory_utilization: 0.90
+  max_model_len: null
+  dtype: "auto"
+
+# Example model configurations
+models:
+  # qwen3-coder-30b:
+  #   source: "Qwen/Qwen3-Coder-30B-A3B"
+  #   gpu: [0, 1]
+  #   tensor_parallel_size: 2
+  #   max_model_len: 131072
+  #   tool_call_parser: "hermes"
+  #   reasoning_parser: "qwen3"
+  #   guided_decoding_backend: "xgrammar"
+  #   enable_lora: true
+  #   max_loras: 4
+  #   autoload: true
+  #   kv_cache:
+  #     dtype: "fp8_e4m3"
+  #   context:
+  #     enable_prefix_caching: true
+  #   lifecycle:
+  #     idle_sleep_timeout: 3600
+
+context_compression:
+  enabled: false
+  method: "llmlingua2"
+  target_ratio: 0.5
+  min_length: 4096
