@@ -19,6 +19,7 @@ from lean_ai_serve.models.downloader import ModelDownloader
 from lean_ai_serve.models.registry import ModelRegistry
 from lean_ai_serve.models.schemas import ModelState
 from lean_ai_serve.security.audit import AuditLogger
+from lean_ai_serve.security.auth import load_revoked_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +44,30 @@ async def lifespan(app: FastAPI):
     await registry.sync_from_config(settings.models)
     app.state.registry = registry
 
-    # Audit logger
-    audit = AuditLogger(db)
+    # Audit logger (with optional encryption)
+    encryption_service = None
+    if settings.encryption.at_rest.enabled:
+        from lean_ai_serve.security.encryption import EncryptionService
+
+        encryption_service = EncryptionService(settings.encryption.at_rest)
+        app.state.encryption_service = encryption_service
+        logger.info("Encryption at rest enabled")
+
+    audit = AuditLogger(db, encryption=encryption_service)
     await audit.initialize()
     app.state.audit = audit
+
+    # Load revoked JWT tokens into memory
+    await load_revoked_tokens(db)
+
+    # LDAP service (if configured)
+    if "ldap" in settings.security.mode.lower():
+        from lean_ai_serve.security.ldap_auth import LDAPService
+
+        ldap_service = LDAPService(settings.security.ldap)
+        await ldap_service.initialize()
+        app.state.ldap_service = ldap_service
+        logger.info("LDAP authentication enabled")
 
     # Model downloader
     downloader = ModelDownloader()
@@ -89,6 +110,12 @@ async def lifespan(app: FastAPI):
 
     # --- Shutdown ---
     logger.info("lean-ai-serve shutting down")
+
+    # Close LDAP connections
+    ldap_svc = getattr(app.state, "ldap_service", None)
+    if ldap_svc:
+        await ldap_svc.close()
+
     await pm.close()
     await close_proxy_client()
     await db.close()
@@ -110,6 +137,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
 
     # Register routers
     from lean_ai_serve.api.audit_routes import router as audit_router
+    from lean_ai_serve.api.auth_routes import router as auth_router
     from lean_ai_serve.api.health import router as health_router
     from lean_ai_serve.api.keys import router as keys_router
     from lean_ai_serve.api.models import router as models_router
@@ -120,6 +148,15 @@ def create_app(config_path: str | None = None) -> FastAPI:
     app.include_router(models_router)
     app.include_router(keys_router)
     app.include_router(audit_router)
+    app.include_router(auth_router)
+
+    # Content filter middleware (must be added after routers)
+    settings = get_settings()
+    if settings.security.content_filtering.enabled:
+        from lean_ai_serve.security.content_filter import ContentFilter, ContentFilterMiddleware
+
+        cf = ContentFilter(settings.security.content_filtering)
+        app.add_middleware(ContentFilterMiddleware, content_filter=cf)
 
     return app
 

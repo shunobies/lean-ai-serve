@@ -19,10 +19,14 @@ class AuditLogger:
 
     Each row includes a SHA-256 hash of the previous row, forming a chain
     that can be verified to detect unauthorized modifications.
+
+    Optionally encrypts prompt/response content at rest when an
+    EncryptionService is provided.
     """
 
-    def __init__(self, db: Database):
+    def __init__(self, db: Database, encryption=None):
         self._db = db
+        self._encryption = encryption  # Optional EncryptionService
         self._last_hash: str | None = None
 
     async def initialize(self) -> None:
@@ -78,6 +82,12 @@ class AuditLogger:
         if settings.audit.log_prompts and not settings.audit.log_prompts_hash_only:
             store_prompt = prompt
             store_response = response
+
+            # Encrypt at rest if configured
+            if self._encryption and store_prompt:
+                store_prompt = self._encryption.encrypt(store_prompt)
+            if self._encryption and store_response:
+                store_response = self._encryption.encrypt(store_response)
 
         # Build row data string for chain hash
         row_data = json.dumps(

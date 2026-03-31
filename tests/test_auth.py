@@ -70,12 +70,16 @@ def test_jwt_roundtrip():
 
     set_settings(Settings(security={"jwt_secret": "test-secret-123"}))
 
-    token = issue_jwt("user1", "User One", ["admin"], ["*"])
+    token, jti, expires_at = issue_jwt("user1", "User One", ["admin"], ["*"])
+    assert jti  # Should have a JTI
+    assert expires_at  # Should have an expiry
+
     payload = decode_jwt(token)
     assert payload is not None
     assert payload["sub"] == "user1"
     assert payload["name"] == "User One"
     assert payload["roles"] == ["admin"]
+    assert payload["jti"] == jti
 
 
 def test_jwt_invalid_token():

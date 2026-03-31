@@ -12,7 +12,7 @@ from lean_ai_serve.engine.proxy import proxy_request
 from lean_ai_serve.engine.router import Router
 from lean_ai_serve.models.schemas import AuthUser, ModelState
 from lean_ai_serve.security.audit import AuditLogger
-from lean_ai_serve.security.auth import require_permission
+from lean_ai_serve.security.rate_limiter import check_rate_limit
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ def _get_audit(request: Request) -> AuditLogger:
 @router.post("/chat/completions")
 async def chat_completions(
     request: Request,
-    user: AuthUser = Depends(require_permission("inference:call")),
+    user: AuthUser = Depends(check_rate_limit),
 ):
     """Proxy chat completions to the appropriate vLLM backend."""
     body = await request.body()
@@ -80,7 +80,7 @@ async def chat_completions(
 @router.post("/completions")
 async def completions(
     request: Request,
-    user: AuthUser = Depends(require_permission("inference:call")),
+    user: AuthUser = Depends(check_rate_limit),
 ):
     """Proxy text completions (FIM) to vLLM."""
     body = await request.body()
@@ -106,7 +106,7 @@ async def completions(
 @router.post("/embeddings")
 async def embeddings(
     request: Request,
-    user: AuthUser = Depends(require_permission("inference:call")),
+    user: AuthUser = Depends(check_rate_limit),
 ):
     """Proxy embedding requests to vLLM."""
     body = await request.body()
@@ -132,7 +132,7 @@ async def embeddings(
 @router.get("/models")
 async def list_models(
     request: Request,
-    user: AuthUser = Depends(require_permission("inference:call")),
+    user: AuthUser = Depends(check_rate_limit),
 ):
     """List models available to the authenticated user (OpenAI format)."""
     from lean_ai_serve.models.registry import ModelRegistry

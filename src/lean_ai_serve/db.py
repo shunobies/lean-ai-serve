@@ -119,12 +119,21 @@ CREATE TABLE IF NOT EXISTS datasets (
     metadata_json   TEXT
 );
 
+-- Revoked JWT tokens (for logout / token refresh)
+CREATE TABLE IF NOT EXISTS revoked_tokens (
+    jti         TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL,
+    revoked_at  TEXT NOT NULL,
+    expires_at  TEXT NOT NULL    -- When the JWT would have expired naturally
+);
+
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp);
 CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user_id);
 CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action);
 CREATE INDEX IF NOT EXISTS idx_usage_hour ON usage(hour);
 CREATE INDEX IF NOT EXISTS idx_training_state ON training_jobs(state);
+CREATE INDEX IF NOT EXISTS idx_revoked_expires ON revoked_tokens(expires_at);
 """
 
 
