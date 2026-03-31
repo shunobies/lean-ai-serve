@@ -81,6 +81,29 @@ async def lifespan(app: FastAPI):
     router = Router(registry, pm)
     app.state.router = router
 
+    # Training subsystem (if enabled)
+    if settings.training.enabled:
+        from lean_ai_serve.training.adapters import AdapterRegistry
+        from lean_ai_serve.training.backend import create_backend
+        from lean_ai_serve.training.datasets import DatasetManager
+        from lean_ai_serve.training.orchestrator import TrainingOrchestrator
+
+        dataset_manager = DatasetManager(db, settings)
+        app.state.dataset_manager = dataset_manager
+
+        adapter_registry = AdapterRegistry(db)
+        app.state.adapter_registry = adapter_registry
+
+        training_backend = create_backend(settings)
+        app.state.training_backend = training_backend
+
+        orchestrator = TrainingOrchestrator(
+            db, settings, training_backend, dataset_manager, adapter_registry
+        )
+        app.state.training_orchestrator = orchestrator
+
+        logger.info("Training subsystem enabled (backend=%s)", training_backend.name)
+
     # Timing
     app.state.start_time = time.monotonic()
 
@@ -110,6 +133,11 @@ async def lifespan(app: FastAPI):
 
     # --- Shutdown ---
     logger.info("lean-ai-serve shutting down")
+
+    # Close adapter registry HTTP client
+    adapter_reg = getattr(app.state, "adapter_registry", None)
+    if adapter_reg:
+        await adapter_reg.close()
 
     # Close LDAP connections
     ldap_svc = getattr(app.state, "ldap_service", None)
@@ -149,6 +177,12 @@ def create_app(config_path: str | None = None) -> FastAPI:
     app.include_router(keys_router)
     app.include_router(audit_router)
     app.include_router(auth_router)
+
+    # Training router (conditional on config)
+    if settings.training.enabled:
+        from lean_ai_serve.api.training import router as training_router
+
+        app.include_router(training_router)
 
     # Content filter middleware (must be added after routers)
     settings = get_settings()

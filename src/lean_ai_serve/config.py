@@ -158,6 +158,18 @@ class ModelConfig(BaseModel):
     lifecycle: LifecycleConfig = Field(default_factory=LifecycleConfig)
 
 
+class TrainingConfig(BaseModel):
+    """Training subsystem configuration."""
+
+    enabled: bool = False
+    backend: str = "llama-factory"  # llama-factory (extensible)
+    output_directory: str = ""  # Default: {cache}/training_outputs
+    max_concurrent_jobs: int = 1
+    default_gpu: list[int] = Field(default_factory=lambda: [0])
+    dataset_directory: str = ""  # Default: {cache}/datasets
+    max_dataset_size_mb: int = 1024
+
+
 class ContextCompressionConfig(BaseModel):
     enabled: bool = False
     method: str = "llmlingua2"
@@ -186,18 +198,25 @@ class Settings(BaseModel):
     cache: CacheConfig = Field(default_factory=CacheConfig)
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig)
     models: dict[str, ModelConfig] = Field(default_factory=dict)
+    training: TrainingConfig = Field(default_factory=TrainingConfig)
     context_compression: ContextCompressionConfig = Field(
         default_factory=ContextCompressionConfig
     )
 
     @model_validator(mode="after")
     def _resolve_paths(self) -> Settings:
-        """Expand ~ in paths."""
+        """Expand ~ in paths and resolve training defaults."""
         self.cache.directory = str(Path(self.cache.directory).expanduser())
         if self.encryption.at_rest.key_file:
             self.encryption.at_rest.key_file = str(
                 Path(self.encryption.at_rest.key_file).expanduser()
             )
+        # Training path defaults
+        cache = self.cache.directory
+        if not self.training.output_directory:
+            self.training.output_directory = str(Path(cache) / "training_outputs")
+        if not self.training.dataset_directory:
+            self.training.dataset_directory = str(Path(cache) / "datasets")
         return self
 
     @model_validator(mode="after")
