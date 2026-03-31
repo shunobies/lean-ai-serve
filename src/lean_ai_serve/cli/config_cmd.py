@@ -17,8 +17,8 @@ console = Console()
 _SENSITIVE_FIELDS = {
     "jwt_secret",
     "bind_password",
-    "key",
-    "encryption_key",
+    "huggingface_token",
+    "client_secret",
 }
 
 
@@ -42,12 +42,32 @@ def _mask_sensitive(data: dict, depth: int = 0) -> dict:
     return result
 
 
+def _load_cli_key(config: str | None, key_file: str | None) -> bytes:
+    """Load the master key from --config or --key-file for CLI commands."""
+    from lean_ai_serve.security.secrets import load_key_from_file, load_master_key
+
+    if key_file:
+        return load_key_from_file(key_file)
+    if config:
+        import yaml
+
+        with open(config) as f:
+            data = yaml.safe_load(f) or {}
+        enc_config = data.get("encryption")
+        if not enc_config:
+            console.print("[red]No encryption section found in config file[/red]")
+            raise typer.Exit(1) from None
+        return load_master_key(enc_config)
+    console.print("[red]Provide --config or --key-file to locate the master key[/red]")
+    raise typer.Exit(1) from None
+
+
 @config_app.command("show")
 def config_show(
     config: str = typer.Option(None, "--config", "-c", help="Path to config.yaml"),
     raw: bool = typer.Option(False, "--raw", help="Show without masking secrets"),
 ):
-    """Show the resolved configuration (env + YAML + defaults)."""
+    """Show the resolved configuration (YAML + defaults)."""
     settings = _init_settings(config)
     data = settings.model_dump()
 
@@ -101,3 +121,75 @@ def config_validate(
     console.print(f"  Logging: {settings.logging.level} ({log_fmt})")
     console.print(f"  Models: {len(settings.models)}")
     console.print(f"  Training: {'enabled' if settings.training.enabled else 'disabled'}")
+
+
+# ---------------------------------------------------------------------------
+# Secret management commands
+# ---------------------------------------------------------------------------
+
+
+@config_app.command("generate-key")
+def config_generate_key(
+    output: str = typer.Argument(help="Path to write the 256-bit master key file"),
+):
+    """Generate a master key for encrypting config secrets.
+
+    The generated key is used with ``encryption.at_rest`` to encrypt sensitive
+    values in config.yaml via the ``ENC[...]`` pattern.
+    """
+    from lean_ai_serve.security.encryption import generate_key_file
+
+    try:
+        generate_key_file(output)
+    except Exception as e:
+        console.print(f"[red]Failed to generate key:[/red] {e}")
+        raise typer.Exit(1) from None
+    console.print(f"[green]Master key generated:[/green] {output}")
+    console.print("[dim]File permissions set to 600.  Keep this file safe.[/dim]")
+
+
+@config_app.command("encrypt-value")
+def config_encrypt_value(
+    value: str = typer.Argument(help="Plain text value to encrypt"),
+    config: str = typer.Option(None, "--config", "-c", help="Config file (reads key from it)"),
+    key_file: str = typer.Option(None, "--key-file", "-k", help="Direct path to key file"),
+):
+    """Encrypt a value for use in config.yaml as ENC[...].
+
+    Provide either --config (reads key from encryption.at_rest section) or
+    --key-file (direct path to the 256-bit key file).
+    """
+    from lean_ai_serve.security.secrets import encrypt_value
+
+    try:
+        key = _load_cli_key(config, key_file)
+        encrypted = encrypt_value(value, key)
+    except typer.Exit:
+        raise
+    except Exception as e:
+        console.print(f"[red]Encryption failed:[/red] {e}")
+        raise typer.Exit(1) from None
+
+    console.print(f"[green]Encrypted value:[/green]\n{encrypted}")
+    console.print("\n[dim]Paste this into your config.yaml[/dim]")
+
+
+@config_app.command("decrypt-value")
+def config_decrypt_value(
+    value: str = typer.Argument(help='ENC[...] value to decrypt'),
+    config: str = typer.Option(None, "--config", "-c", help="Config file (reads key from it)"),
+    key_file: str = typer.Option(None, "--key-file", "-k", help="Direct path to key file"),
+):
+    """Decrypt an ENC[...] value from config.yaml."""
+    from lean_ai_serve.security.secrets import decrypt_value
+
+    try:
+        key = _load_cli_key(config, key_file)
+        decrypted = decrypt_value(value, key)
+    except typer.Exit:
+        raise
+    except Exception as e:
+        console.print(f"[red]Decryption failed:[/red] {e}")
+        raise typer.Exit(1) from None
+
+    console.print(f"[green]Decrypted value:[/green] {decrypted}")

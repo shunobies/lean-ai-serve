@@ -1,4 +1,4 @@
-"""Configuration system — YAML file + environment variable overrides."""
+"""Configuration system — YAML file with encrypted secret support."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ from typing import Any
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
-from pydantic_settings import BaseSettings
 
 logger = logging.getLogger(__name__)
 
@@ -225,14 +224,15 @@ class TracingConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class Settings(BaseSettings):
-    """Top-level application settings loaded from YAML + env overrides.
+class Settings(BaseModel):
+    """Top-level application settings loaded from YAML config file.
 
-    Environment variables override YAML values using the prefix LEAN_AI_SERVE_
-    and double underscore for nesting: LEAN_AI_SERVE_SERVER__PORT=9000
+    YAML is the single source of truth.  Secret values support two patterns:
+
+    - ``ENV[VAR_NAME]`` — resolved from the named environment variable.
+    - ``ENC[ciphertext]`` — decrypted using the master key from
+      ``encryption.at_rest``.
     """
-
-    model_config = {"env_prefix": "LEAN_AI_SERVE_", "env_nested_delimiter": "__"}
 
     server: ServerConfig = Field(default_factory=ServerConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
@@ -279,40 +279,15 @@ class Settings(BaseSettings):
         return self
 
 
-def _get_env_overrides(
-    prefix: str = "LEAN_AI_SERVE_", delimiter: str = "__"
-) -> dict[str, Any]:
-    """Extract env vars with the given prefix and convert to a nested dict."""
-    import os
-
-    overrides: dict[str, Any] = {}
-    for key, value in os.environ.items():
-        if not key.startswith(prefix):
-            continue
-        path = key[len(prefix) :].lower().split(delimiter)
-        d = overrides
-        for part in path[:-1]:
-            d = d.setdefault(part, {})
-        d[path[-1]] = value
-    return overrides
-
-
-def _deep_merge(base: dict, override: dict) -> dict:
-    """Deep merge override into base (override wins on conflict)."""
-    result = base.copy()
-    for key, value in override.items():
-        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-            result[key] = _deep_merge(result[key], value)
-        else:
-            result[key] = value
-    return result
-
-
 def load_settings(config_path: str | Path | None = None) -> Settings:
-    """Load settings from YAML file with environment variable overrides.
+    """Load settings from YAML config file.
 
-    Priority: env vars (LEAN_AI_SERVE_ prefix) > YAML file > defaults.
+    YAML is the single source of truth for all configuration.  Secret values
+    can use ``ENV[VAR_NAME]`` or ``ENC[ciphertext]`` patterns — see
+    :mod:`lean_ai_serve.security.secrets` for details.
     """
+    from lean_ai_serve.security.secrets import resolve_config_secrets
+
     yaml_data: dict[str, Any] = {}
 
     if config_path is None:
@@ -336,10 +311,11 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
         else:
             logger.warning("Config file not found: %s — using defaults", config_path)
 
-    # Merge: env vars override YAML values
-    env_overrides = _get_env_overrides()
-    merged = _deep_merge(yaml_data, env_overrides)
-    return Settings(**merged)
+    # Resolve ENV[] and ENC[] secret references
+    encryption_config = yaml_data.get("encryption")
+    yaml_data = resolve_config_secrets(yaml_data, encryption_config)
+
+    return Settings(**yaml_data)
 
 
 # Module-level singleton — initialized lazily or by main.py

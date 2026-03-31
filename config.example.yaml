@@ -1,3 +1,18 @@
+# ---------------------------------------------------------------------------
+# lean-ai-serve configuration
+#
+# YAML is the single source of truth.  Secret values support two patterns:
+#
+#   ENV[VAR_NAME]     — resolved from the named environment variable.
+#   ENC[ciphertext]   — decrypted using the master key from encryption.at_rest.
+#
+# Quick-start for encrypted secrets:
+#   1. lean-ai-serve config generate-key /etc/lean-ai-serve/master.key
+#   2. lean-ai-serve config encrypt-value "my-secret" -k /etc/lean-ai-serve/master.key
+#   3. Paste the ENC[...] output into this file.
+#   4. Set encryption.at_rest.enabled + key_file below.
+# ---------------------------------------------------------------------------
+
 server:
   host: "0.0.0.0"
   port: 8420
@@ -9,6 +24,8 @@ server:
 security:
   mode: "api_key"                    # api_key, ldap, oidc, ldap+api_key
   jwt_secret: ""                     # Auto-generated if empty (sessions won't survive restarts)
+  # jwt_secret: "ENV[MY_JWT_SECRET]"  # Read from env var at startup
+  # jwt_secret: "ENC[base64...]"      # Encrypted — decrypted at startup via master key
   jwt_expiry_hours: 8.0
 
   # LDAP/Active Directory (when mode includes "ldap")
@@ -68,7 +85,7 @@ encryption:
 
 cache:
   directory: "~/.cache/lean-ai-serve"
-  huggingface_token: ""              # Or set HF_TOKEN env var
+  huggingface_token: ""              # Or: "ENV[HF_TOKEN]" / "ENC[base64...]"
 
 defaults:
   gpu_memory_utilization: 0.90
@@ -117,7 +134,6 @@ training:
 
 # --- Observability ---
 # All features are independently toggleable.
-# Env override example: LEAN_AI_SERVE_METRICS__ENABLED=false
 
 metrics:
   enabled: true

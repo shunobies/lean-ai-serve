@@ -37,7 +37,6 @@ dependencies = [
     # Configuration
     "pyyaml>=6.0",
     "pydantic>=2.9.0,<3.0",
-    "pydantic-settings>=2.6.0,<3.0",
 
     # HuggingFace model management
     "huggingface-hub>=0.26.0,<1.0",

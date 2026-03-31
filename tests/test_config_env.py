@@ -1,6 +1,8 @@
-"""Tests for environment variable config overrides and new config models."""
+"""Tests for configuration loading, config model defaults, and secret resolution."""
 
 from __future__ import annotations
+
+import os
 
 import pytest
 
@@ -110,58 +112,12 @@ def test_settings_backward_compat():
 
 
 # ---------------------------------------------------------------------------
-# Environment variable overrides
+# YAML loading
 # ---------------------------------------------------------------------------
 
 
-def test_env_overrides_simple(monkeypatch):
-    """Environment variable overrides a simple top-level nested value."""
-    monkeypatch.setenv("LEAN_AI_SERVE_SERVER__PORT", "9000")
-    s = Settings()
-    assert s.server.port == 9000
-
-
-def test_env_overrides_security_mode(monkeypatch):
-    """Nested env var overrides security mode."""
-    monkeypatch.setenv("LEAN_AI_SERVE_SECURITY__MODE", "oidc+api_key")
-    s = Settings()
-    assert s.security.mode == "oidc+api_key"
-
-
-def test_env_overrides_metrics_enabled(monkeypatch):
-    """Env var can disable metrics."""
-    monkeypatch.setenv("LEAN_AI_SERVE_METRICS__ENABLED", "false")
-    s = Settings()
-    assert s.metrics.enabled is False
-
-
-def test_env_overrides_logging_level(monkeypatch):
-    """Env var can change logging level."""
-    monkeypatch.setenv("LEAN_AI_SERVE_LOGGING__LEVEL", "DEBUG")
-    s = Settings()
-    assert s.logging.level == "DEBUG"
-
-
-def test_env_overrides_tracing_enabled(monkeypatch):
-    """Env var can enable tracing."""
-    monkeypatch.setenv("LEAN_AI_SERVE_TRACING__ENABLED", "true")
-    monkeypatch.setenv("LEAN_AI_SERVE_TRACING__ENDPOINT", "http://localhost:4317")
-    s = Settings()
-    assert s.tracing.enabled is True
-    assert s.tracing.endpoint == "http://localhost:4317"
-
-
-def test_env_precedence_over_yaml(monkeypatch, tmp_path):
-    """Env var takes precedence over YAML file value."""
-    config_file = tmp_path / "config.yaml"
-    config_file.write_text("server:\n  port: 8420\n")
-    monkeypatch.setenv("LEAN_AI_SERVE_SERVER__PORT", "9999")
-    s = load_settings(str(config_file))
-    assert s.server.port == 9999
-
-
 def test_yaml_values_loaded(tmp_path):
-    """YAML values are loaded when no env overrides."""
+    """YAML values are loaded correctly."""
     config_file = tmp_path / "config.yaml"
     config_file.write_text(
         "server:\n  port: 7777\nmetrics:\n  gpu_poll_interval: 15\n"
@@ -171,8 +127,8 @@ def test_yaml_values_loaded(tmp_path):
     assert s.metrics.gpu_poll_interval == 15
 
 
-def test_defaults_preserved_no_yaml_no_env():
-    """Without YAML or env, defaults are preserved."""
+def test_defaults_preserved_no_yaml():
+    """Without YAML, defaults are preserved."""
     s = Settings()
     assert s.server.host == "0.0.0.0"
     assert s.server.port == 8420
@@ -185,6 +141,72 @@ def test_load_settings_missing_file(tmp_path):
     """load_settings with nonexistent file falls back to defaults."""
     s = load_settings(str(tmp_path / "nonexistent.yaml"))
     assert s.server.port == 8420
+
+
+# ---------------------------------------------------------------------------
+# Secret resolution via load_settings (integration tests)
+# ---------------------------------------------------------------------------
+
+
+def test_env_ref_resolved_in_yaml(monkeypatch, tmp_path):
+    """ENV[VAR] in YAML is resolved during load."""
+    monkeypatch.setenv("MY_JWT", "resolved-jwt")
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text('security:\n  jwt_secret: "ENV[MY_JWT]"\n')
+    s = load_settings(str(config_file))
+    assert s.security.jwt_secret == "resolved-jwt"
+
+
+def test_enc_ref_resolved_in_yaml(tmp_path):
+    """ENC[...] in YAML is decrypted during load."""
+    from lean_ai_serve.security.secrets import encrypt_value
+
+    key = os.urandom(32)
+    key_path = tmp_path / "master.key"
+    key_path.write_bytes(key)
+
+    encrypted = encrypt_value("super-secret-jwt", key)
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        f'security:\n  jwt_secret: "{encrypted}"\n'
+        f"encryption:\n  at_rest:\n    enabled: true\n    key_source: file\n"
+        f'    key_file: "{key_path}"\n'
+    )
+    s = load_settings(str(config_file))
+    assert s.security.jwt_secret == "super-secret-jwt"
+
+
+def test_env_and_enc_combined(monkeypatch, tmp_path):
+    """Both ENV[] and ENC[] work together through load_settings."""
+    from lean_ai_serve.security.secrets import encrypt_value
+
+    key = os.urandom(32)
+    key_path = tmp_path / "master.key"
+    key_path.write_bytes(key)
+    monkeypatch.setenv("HF_TEST_TOKEN", "hf_abc123")
+
+    encrypted_jwt = encrypt_value("my-jwt", key)
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        f'security:\n  jwt_secret: "{encrypted_jwt}"\n'
+        f'cache:\n  huggingface_token: "ENV[HF_TEST_TOKEN]"\n'
+        f"encryption:\n  at_rest:\n    enabled: true\n    key_source: file\n"
+        f'    key_file: "{key_path}"\n'
+    )
+    s = load_settings(str(config_file))
+    assert s.security.jwt_secret == "my-jwt"
+    assert s.cache.huggingface_token == "hf_abc123"
+
+
+def test_plain_yaml_no_secrets(tmp_path):
+    """YAML without ENV[]/ENC[] works normally (no encryption config needed)."""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        "server:\n  port: 9999\nsecurity:\n  jwt_secret: plain-text-dev\n"
+    )
+    s = load_settings(str(config_file))
+    assert s.server.port == 9999
+    assert s.security.jwt_secret == "plain-text-dev"
 
 
 @pytest.fixture(autouse=True)
