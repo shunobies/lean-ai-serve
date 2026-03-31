@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -218,33 +219,49 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # --- Shutdown ---
+    # --- Shutdown (ordered, with timeout guards) ---
     logger.info("lean-ai-serve shutting down")
+    shutdown_timeout = 15.0  # Per-component timeout
 
-    # Stop background scheduler first
-    await scheduler.stop()
+    async def _safe_close(name: str, coro) -> None:
+        """Run a shutdown coroutine with a timeout guard."""
+        try:
+            await asyncio.wait_for(coro, timeout=shutdown_timeout)
+            logger.debug("Shutdown: %s closed", name)
+        except TimeoutError:
+            logger.warning("Shutdown: %s timed out after %.0fs", name, shutdown_timeout)
+        except Exception:
+            logger.exception("Shutdown: %s failed", name)
 
-    # Close adapter registry HTTP client
+    # 1. Stop background scheduler first (prevents new tasks)
+    await _safe_close("background-scheduler", scheduler.stop())
+
+    # 2. Close external auth connectors (independent, run in parallel)
+    auth_tasks = []
     adapter_reg = getattr(app.state, "adapter_registry", None)
     if adapter_reg:
-        await adapter_reg.close()
-
-    # Close LDAP connections
+        auth_tasks.append(_safe_close("adapter-registry", adapter_reg.close()))
     ldap_svc = getattr(app.state, "ldap_service", None)
     if ldap_svc:
-        await ldap_svc.close()
-
-    # Close OIDC validator
+        auth_tasks.append(_safe_close("ldap", ldap_svc.close()))
     oidc_val = getattr(app.state, "oidc_validator", None)
     if oidc_val:
-        await oidc_val.close()
+        auth_tasks.append(_safe_close("oidc", oidc_val.close()))
+    if auth_tasks:
+        await asyncio.gather(*auth_tasks)
 
-    # Stop lifecycle manager before process manager
-    await lifecycle.stop()
+    # 3. Stop lifecycle manager before process manager
+    await _safe_close("lifecycle-manager", lifecycle.stop())
 
-    await pm.close()
-    await close_proxy_client()
-    await db.close()
+    # 4. Stop vLLM processes
+    await _safe_close("process-manager", pm.close())
+
+    # 5. Close HTTP clients
+    await _safe_close("proxy-client", close_proxy_client())
+
+    # 6. Close database last (other components may have final writes)
+    await _safe_close("database", db.close())
+
     logger.info("Shutdown complete")
 
 
@@ -286,8 +303,16 @@ def create_app(config_path: str | None = None) -> FastAPI:
 
         app.include_router(training_router)
 
-    # Middlewares (order: outermost first = request-id, then metrics, then content filter)
+    # Middlewares (order: outermost first)
+    # Execution order for incoming requests: request-id → metrics → content-filter → compression
     settings = get_settings()
+
+    if settings.context_compression.enabled:
+        from lean_ai_serve.middleware.compression import CompressionMiddleware, ContextCompressor
+
+        compressor = ContextCompressor(settings.context_compression)
+        app.add_middleware(CompressionMiddleware, compressor=compressor)
+
     if settings.security.content_filtering.enabled:
         from lean_ai_serve.security.content_filter import ContentFilter, ContentFilterMiddleware
 

@@ -85,9 +85,12 @@ def load_master_key(encryption_config: dict) -> bytes:
         return key
 
     if key_source == "vault":
-        raise NotImplementedError(
-            "Vault key source not yet implemented for config secret decryption"
-        )
+        from lean_ai_serve.config import EncryptionAtRestConfig
+        from lean_ai_serve.security.vault import VaultKeyProvider
+
+        vault_cfg = EncryptionAtRestConfig(**at_rest)
+        provider = VaultKeyProvider(vault_cfg)
+        return provider.fetch_key()
 
     raise ValueError(f"Unknown key_source: {key_source}")
 

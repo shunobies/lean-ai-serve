@@ -130,10 +130,10 @@ class TestKeyLoading:
         with pytest.raises(ValueError, match="NONEXISTENT_KEY"):
             load_master_key(config)
 
-    def test_load_master_key_vault_not_implemented(self):
-        """Vault source raises NotImplementedError."""
+    def test_load_master_key_vault_requires_hvac(self):
+        """Vault source raises ImportError when hvac is not installed."""
         config = {"at_rest": {"key_source": "vault"}}
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(ImportError, match="hvac"):
             load_master_key(config)
 
     def test_load_master_key_flat_dict(self, key_file, master_key):

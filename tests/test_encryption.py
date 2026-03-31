@@ -130,12 +130,12 @@ def test_generate_key_file(tmp_path):
     assert svc.decrypt(svc.encrypt("test")) == "test"
 
 
-def test_vault_not_implemented():
-    """Vault key source should raise NotImplementedError."""
+def test_vault_requires_hvac():
+    """Vault key source raises ImportError when hvac is not installed."""
     config = EncryptionAtRestConfig(
         enabled=True, key_source="vault"
     )
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(ImportError, match="hvac"):
         EncryptionService(config)
 
 

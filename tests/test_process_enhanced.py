@@ -200,6 +200,36 @@ def test_kv_cache_auto_dtype_no_flags():
     assert "--calculate-kv-scales" not in cmd
 
 
+def test_turboquant_kv_cache_dtype():
+    """Turboquant dtype formats as turboquant_N.N in the command."""
+    config = ModelConfig(
+        source="org/model",
+        kv_cache=KVCacheConfig(dtype="turboquant", turboquant_bits=3.0),
+    )
+    _make_settings({"test-model": config})
+
+    pm = ProcessManager()
+    cmd = pm._build_command("test-model", config, "/models/org/model", 8430)
+
+    idx = cmd.index("--kv-cache-dtype")
+    assert cmd[idx + 1] == "turboquant_3.0"
+
+
+def test_turboquant_custom_bits():
+    """Custom turboquant bits value is passed through."""
+    config = ModelConfig(
+        source="org/model",
+        kv_cache=KVCacheConfig(dtype="turboquant", turboquant_bits=2.5),
+    )
+    _make_settings({"test-model": config})
+
+    pm = ProcessManager()
+    cmd = pm._build_command("test-model", config, "/models/org/model", 8430)
+
+    idx = cmd.index("--kv-cache-dtype")
+    assert cmd[idx + 1] == "turboquant_2.5"
+
+
 # ---------------------------------------------------------------------------
 # Command building — smoke test for key flags
 # ---------------------------------------------------------------------------

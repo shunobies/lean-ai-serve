@@ -60,10 +60,10 @@ class EncryptionService:
             return key
 
         if config.key_source == "vault":
-            raise NotImplementedError(
-                "HashiCorp Vault integration not yet implemented. "
-                "Use key_source='file' or key_source='env' for now."
-            )
+            from lean_ai_serve.security.vault import VaultKeyProvider
+
+            provider = VaultKeyProvider(config)
+            return provider.fetch_key()
 
         raise ValueError(f"Unknown key_source: {config.key_source}")
 

@@ -9,7 +9,15 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from lean_ai_serve import __version__
 from lean_ai_serve.config import load_settings, set_settings
+
+
+def _version_callback(value: bool):
+    if value:
+        print(f"lean-ai-serve {__version__}")
+        raise typer.Exit()
+
 
 app = typer.Typer(
     name="lean-ai-serve",
@@ -17,6 +25,16 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
+
+
+@app.callback()
+def main_callback(
+    version: bool = typer.Option(
+        None, "--version", "-V", callback=_version_callback, is_eager=True,
+        help="Show version and exit.",
+    ),
+):
+    """Secure vLLM inference, model management & fine-tuning server."""
 
 
 def _run(coro):
@@ -340,9 +358,81 @@ def status(
 
 
 # ---------------------------------------------------------------------------
+# lean-ai-serve check
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def check(
+    config: str = typer.Option(None, "--config", "-c", help="Path to config.yaml"),
+):
+    """Pre-flight check: validate config, GPUs, and optional dependencies."""
+    from shutil import which
+
+    settings = _init_settings(config)
+    issues: list[str] = []
+    ok: list[str] = []
+
+    # Config validation
+    ok.append("Config loaded successfully")
+
+    # Security checks
+    if settings.security.mode == "oidc" and not settings.security.oidc.issuer_url:
+        issues.append("OIDC mode enabled but no issuer_url configured")
+    if settings.security.mode == "ldap" and not settings.security.ldap.server_url:
+        issues.append("LDAP mode enabled but no server_url configured")
+    if settings.tracing.enabled and not settings.tracing.endpoint:
+        issues.append("Tracing enabled but no endpoint configured")
+
+    # GPU check
+    from lean_ai_serve.utils.gpu import get_gpu_info
+
+    gpus = get_gpu_info()
+    if gpus:
+        ok.append(f"GPUs detected: {len(gpus)}")
+    else:
+        issues.append("No NVIDIA GPUs detected (nvidia-ml-py may not be installed)")
+
+    # vLLM check
+    if which("python"):
+        ok.append("Python available in PATH")
+    else:
+        issues.append("Python not found in PATH (vLLM subprocess won't work)")
+
+    # Optional dependency checks
+    try:
+        import llmlingua  # noqa: F401
+
+        ok.append("llmlingua available (context compression)")
+    except ImportError:
+        if settings.context_compression.enabled:
+            issues.append("Context compression enabled but llmlingua not installed")
+
+    try:
+        import hvac  # noqa: F401
+
+        ok.append("hvac available (Vault integration)")
+    except ImportError:
+        if settings.encryption.at_rest.key_source == "vault":
+            issues.append("Vault key source configured but hvac not installed")
+
+    # Report
+    for item in ok:
+        console.print(f"  [green]✓[/green] {item}")
+    for issue in issues:
+        console.print(f"  [yellow]⚠[/yellow] {issue}")
+
+    if issues:
+        console.print(f"\n[yellow]{len(issues)} warning(s)[/yellow]")
+    else:
+        console.print("\n[green]All checks passed[/green]")
+
+
+# ---------------------------------------------------------------------------
 # Subcommand groups (imported from separate modules)
 # ---------------------------------------------------------------------------
 
+from lean_ai_serve.cli.admin import admin_app  # noqa: E402
 from lean_ai_serve.cli.audit import audit_app  # noqa: E402
 from lean_ai_serve.cli.config_cmd import config_app  # noqa: E402
 from lean_ai_serve.cli.keys import keys_app  # noqa: E402
@@ -352,6 +442,7 @@ app.add_typer(keys_app, name="keys")
 app.add_typer(audit_app, name="audit")
 app.add_typer(training_app, name="training")
 app.add_typer(config_app, name="config")
+app.add_typer(admin_app, name="admin")
 
 
 if __name__ == "__main__":

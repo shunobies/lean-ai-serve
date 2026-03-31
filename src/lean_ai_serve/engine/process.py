@@ -252,8 +252,11 @@ class ProcessManager:
             cmd.extend(["--max-loras", str(config.max_loras)])
             cmd.extend(["--max-lora-rank", str(config.max_lora_rank)])
 
-        # KV cache dtype
-        if config.kv_cache.dtype != "auto":
+        # KV cache dtype (turboquant uses a special format: turboquant_N.N)
+        if config.kv_cache.dtype == "turboquant":
+            bits = config.kv_cache.turboquant_bits
+            cmd.extend(["--kv-cache-dtype", f"turboquant_{bits}"])
+        elif config.kv_cache.dtype != "auto":
             cmd.extend(["--kv-cache-dtype", config.kv_cache.dtype])
 
         # KV cache scale calculation (for FP8 quantized caches)

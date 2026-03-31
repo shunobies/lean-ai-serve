@@ -80,8 +80,15 @@ encryption:
   at_rest:
     enabled: false
     key_source: "file"               # file, env, vault
-    key_file: ""
-    key_env_var: "LEAN_AI_ENCRYPTION_KEY"
+    key_file: ""                     # Path to 256-bit master key file
+    key_env_var: "LEAN_AI_ENCRYPTION_KEY"  # Env var name (hex or base64, when key_source=env)
+    # --- Vault settings (when key_source="vault") ---
+    # vault_path: "secret/data/lean-ai-serve/encryption-key"
+    # vault_key_field: "key"         # Field name within the Vault secret
+    # vault_auth_method: "token"     # token or approle
+    # vault_role_id_env: "VAULT_ROLE_ID"      # Env var for AppRole role ID
+    # vault_secret_id_env: "VAULT_SECRET_ID"  # Env var for AppRole secret ID
+    # vault_cache_ttl: 300           # Seconds to cache the fetched key
 
 cache:
   directory: "~/.cache/lean-ai-serve"
@@ -160,7 +167,7 @@ tracing:
   service_name: "lean-ai-serve"
 
 context_compression:
-  enabled: false
-  method: "llmlingua2"
-  target_ratio: 0.5
-  min_length: 4096
+  enabled: false                     # Requires: pip install llmlingua
+  method: "llmlingua2"               # Compression algorithm
+  target_ratio: 0.5                  # Target compression ratio (0.0-1.0, lower = more compression)
+  min_length: 4096                   # Skip compression for prompts shorter than this (chars)

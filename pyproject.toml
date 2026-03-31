@@ -75,6 +75,9 @@ training = [
     # This group provides dataset handling utilities
     "pandas>=2.2.0",
 ]
+vault = [
+    "hvac>=2.1.0,<3.0",
+]
 tracing = [
     "opentelemetry-api>=1.27.0",
     "opentelemetry-sdk>=1.27.0",

@@ -86,6 +86,13 @@ class EncryptionAtRestConfig(BaseModel):
     key_source: str = "file"  # file, env, vault
     key_file: str = ""
     key_env_var: str = "LEAN_AI_ENCRYPTION_KEY"
+    # Vault-specific settings (when key_source="vault")
+    vault_path: str = "secret/data/lean-ai-serve/encryption-key"
+    vault_key_field: str = "key"
+    vault_auth_method: str = "token"  # token, approle
+    vault_role_id_env: str = "VAULT_ROLE_ID"
+    vault_secret_id_env: str = "VAULT_SECRET_ID"
+    vault_cache_ttl: int = 300  # Seconds to cache the fetched key
 
 
 class EncryptionConfig(BaseModel):
