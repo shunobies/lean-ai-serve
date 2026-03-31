@@ -8,6 +8,7 @@ from typing import Any
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
+from pydantic_settings import BaseSettings
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,9 @@ class OIDCConfig(BaseModel):
     client_id: str = ""
     audience: str = ""
     roles_claim: str = "realm_access.roles"
+    role_mapping: dict[str, str] = Field(default_factory=dict)  # OIDC role -> app role
+    default_role: str = "user"
+    jwks_cache_ttl: int = 3600  # Seconds to cache JWKS keys
 
 
 class ContentFilterPattern(BaseModel):
@@ -184,13 +188,51 @@ class DefaultsConfig(BaseModel):
     dtype: str = "auto"
 
 
+class MetricsConfig(BaseModel):
+    enabled: bool = True
+    gpu_poll_interval: int = 30  # Seconds between GPU metric polls
+
+
+class LoggingConfig(BaseModel):
+    json_output: bool = True  # True=JSON lines (production), False=console (dev)
+    level: str = "INFO"
+
+
+class AlertRuleConfig(BaseModel):
+    name: str
+    metric: str  # Metric name to check (e.g., "gpu_memory_used_pct")
+    condition: str = "gt"  # gt, lt, gte, lte, eq
+    threshold: float = 0.0
+    severity: str = "warning"  # info, warning, critical
+    message: str = ""
+
+
+class AlertConfig(BaseModel):
+    enabled: bool = True
+    evaluation_interval: int = 60  # Seconds between alert evaluations
+    rules: list[AlertRuleConfig] = Field(default_factory=list)
+
+
+class TracingConfig(BaseModel):
+    enabled: bool = False
+    endpoint: str = ""  # OTLP exporter endpoint (e.g., "http://localhost:4317")
+    protocol: str = "grpc"  # grpc or http
+    service_name: str = "lean-ai-serve"
+
+
 # ---------------------------------------------------------------------------
 # Top-level settings
 # ---------------------------------------------------------------------------
 
 
-class Settings(BaseModel):
-    """Top-level application settings loaded from YAML + env overrides."""
+class Settings(BaseSettings):
+    """Top-level application settings loaded from YAML + env overrides.
+
+    Environment variables override YAML values using the prefix LEAN_AI_SERVE_
+    and double underscore for nesting: LEAN_AI_SERVE_SERVER__PORT=9000
+    """
+
+    model_config = {"env_prefix": "LEAN_AI_SERVE_", "env_nested_delimiter": "__"}
 
     server: ServerConfig = Field(default_factory=ServerConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
@@ -203,6 +245,10 @@ class Settings(BaseModel):
     context_compression: ContextCompressionConfig = Field(
         default_factory=ContextCompressionConfig
     )
+    metrics: MetricsConfig = Field(default_factory=MetricsConfig)
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    alerts: AlertConfig = Field(default_factory=AlertConfig)
+    tracing: TracingConfig = Field(default_factory=TracingConfig)
 
     @model_validator(mode="after")
     def _resolve_paths(self) -> Settings:
@@ -233,12 +279,42 @@ class Settings(BaseModel):
         return self
 
 
-def load_settings(config_path: str | Path | None = None) -> Settings:
-    """Load settings from YAML file, falling back to defaults.
+def _get_env_overrides(
+    prefix: str = "LEAN_AI_SERVE_", delimiter: str = "__"
+) -> dict[str, Any]:
+    """Extract env vars with the given prefix and convert to a nested dict."""
+    import os
 
-    Environment variables can override YAML values (not yet implemented —
-    will use pydantic-settings in a future iteration).
+    overrides: dict[str, Any] = {}
+    for key, value in os.environ.items():
+        if not key.startswith(prefix):
+            continue
+        path = key[len(prefix) :].lower().split(delimiter)
+        d = overrides
+        for part in path[:-1]:
+            d = d.setdefault(part, {})
+        d[path[-1]] = value
+    return overrides
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Deep merge override into base (override wins on conflict)."""
+    result = base.copy()
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def load_settings(config_path: str | Path | None = None) -> Settings:
+    """Load settings from YAML file with environment variable overrides.
+
+    Priority: env vars (LEAN_AI_SERVE_ prefix) > YAML file > defaults.
     """
+    yaml_data: dict[str, Any] = {}
+
     if config_path is None:
         # Search common locations
         candidates = [
@@ -256,11 +332,14 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
         if config_path.exists():
             logger.info("Loading config from %s", config_path)
             with open(config_path) as f:
-                raw = yaml.safe_load(f) or {}
-            return Settings(**raw)
-        logger.warning("Config file not found: %s — using defaults", config_path)
+                yaml_data = yaml.safe_load(f) or {}
+        else:
+            logger.warning("Config file not found: %s — using defaults", config_path)
 
-    return Settings()
+    # Merge: env vars override YAML values
+    env_overrides = _get_env_overrides()
+    merged = _deep_merge(yaml_data, env_overrides)
+    return Settings(**merged)
 
 
 # Module-level singleton — initialized lazily or by main.py

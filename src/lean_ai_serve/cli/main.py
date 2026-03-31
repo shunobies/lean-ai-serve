@@ -344,12 +344,14 @@ def status(
 # ---------------------------------------------------------------------------
 
 from lean_ai_serve.cli.audit import audit_app  # noqa: E402
+from lean_ai_serve.cli.config_cmd import config_app  # noqa: E402
 from lean_ai_serve.cli.keys import keys_app  # noqa: E402
 from lean_ai_serve.cli.training import training_app  # noqa: E402
 
 app.add_typer(keys_app, name="keys")
 app.add_typer(audit_app, name="audit")
 app.add_typer(training_app, name="training")
+app.add_typer(config_app, name="config")
 
 
 if __name__ == "__main__":

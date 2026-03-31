@@ -280,11 +280,15 @@ async def authenticate(
 
     # Try OIDC
     if "oidc" in modes:
-        # OIDC validation would go here — decode JWT against IdP JWKS
-        # For now, placeholder
-        raise HTTPException(
-            status_code=501, detail="OIDC authentication not yet implemented"
-        )
+        oidc_validator = getattr(request.app.state, "oidc_validator", None)
+        if oidc_validator is None:
+            raise HTTPException(
+                status_code=503, detail="OIDC validator not initialized"
+            )
+        user = await oidc_validator.validate_token(token)
+        if user:
+            return user
+        raise HTTPException(status_code=401, detail="Invalid OIDC token")
 
     raise HTTPException(status_code=401, detail="Invalid credentials")
 

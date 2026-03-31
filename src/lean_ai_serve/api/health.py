@@ -31,14 +31,57 @@ def _get_registry(request: Request) -> ModelRegistry:
 @router.get("/health", response_model=HealthResponse)
 async def health(request: Request):
     from lean_ai_serve import __version__
+    from lean_ai_serve.config import get_settings
 
+    settings = get_settings()
     registry = _get_registry(request)
     models = await registry.list_models()
     loaded = sum(1 for m in models if m.state == ModelState.LOADED)
+
+    # Readiness: all autoload models must be loaded
+    autoload_names = [n for n, c in settings.models.items() if c.autoload]
+    ready = all(
+        any(m.name == n and m.state == ModelState.LOADED for m in models)
+        for n in autoload_names
+    ) if autoload_names else True
+
+    # Component checks
+    checks: dict[str, str] = {}
+
+    # DB check
+    db = getattr(request.app.state, "db", None)
+    checks["db"] = "ok" if db is not None else "unavailable"
+
+    # GPU check
+    gpus = get_gpu_info()
+    checks["gpu"] = "ok" if gpus else "not_available"
+
+    # OIDC check
+    oidc = getattr(request.app.state, "oidc_validator", None)
+    if oidc is not None:
+        checks["oidc"] = "ok"
+    elif "oidc" in settings.security.mode.lower():
+        checks["oidc"] = "not_initialized"
+    else:
+        checks["oidc"] = "not_configured"
+
+    # Metrics check
+    metrics = getattr(request.app.state, "metrics", None)
+    checks["metrics"] = "ok" if metrics is not None else "disabled"
+
+    # Tracing check
+    checks["tracing"] = "ok" if settings.tracing.enabled else "disabled"
+
+    # Scheduler check
+    scheduler = getattr(request.app.state, "background_scheduler", None)
+    checks["scheduler"] = "ok" if scheduler and scheduler._tasks else "disabled"
+
     return HealthResponse(
         status="ok",
         version=__version__,
         models_loaded=loaded,
+        ready=ready,
+        checks=checks,
     )
 
 

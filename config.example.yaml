@@ -31,10 +31,15 @@ security:
 
   # OIDC (when mode includes "oidc")
   oidc:
-    issuer_url: ""
+    issuer_url: ""                     # e.g. "https://keycloak.corp.com/realms/ai"
     client_id: ""
-    audience: ""
-    roles_claim: "realm_access.roles"
+    audience: ""                       # JWT audience claim to validate
+    roles_claim: "realm_access.roles"  # Dot-notation path to roles in JWT payload
+    role_mapping:                      # Map IdP roles -> lean-ai-serve roles
+      # "keycloak-admin": "admin"
+      # "keycloak-user": "user"
+    default_role: "user"               # Fallback when no roles found
+    jwks_cache_ttl: 3600               # JWKS cache TTL in seconds
 
   # Content filtering for PHI detection
   content_filtering:
@@ -109,6 +114,34 @@ training:
   default_gpu: [0]                     # GPU(s) assigned when job doesn't specify
   dataset_directory: ""                # Default: {cache}/datasets
   max_dataset_size_mb: 1024            # Max upload size per dataset
+
+# --- Observability ---
+# All features are independently toggleable.
+# Env override example: LEAN_AI_SERVE_METRICS__ENABLED=false
+
+metrics:
+  enabled: true
+  gpu_poll_interval: 30              # Seconds between GPU metric snapshots
+
+logging:
+  json_output: true                  # true=JSON lines (production), false=console (dev)
+  level: "INFO"                      # DEBUG, INFO, WARNING, ERROR, CRITICAL
+
+alerts:
+  enabled: true
+  evaluation_interval: 60            # Seconds between alert evaluations
+  rules: []                          # Custom rules override defaults. Example:
+    # - name: "high_gpu_memory"
+    #   metric: "gpu_memory_used_pct"
+    #   condition: "gt"              # gt, lt, gte, lte, eq
+    #   threshold: 90.0
+    #   severity: "warning"
+
+tracing:
+  enabled: false                     # Requires: pip install lean-ai-serve[tracing]
+  endpoint: ""                       # OTLP endpoint, e.g. "http://otel-collector:4317"
+  protocol: "grpc"                   # grpc or http
+  service_name: "lean-ai-serve"
 
 context_compression:
   enabled: false

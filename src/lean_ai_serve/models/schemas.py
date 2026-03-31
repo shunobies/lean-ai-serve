@@ -188,6 +188,8 @@ class HealthResponse(BaseModel):
     status: str = "ok"
     version: str = ""
     models_loaded: int = 0
+    ready: bool = True
+    checks: dict[str, str] = Field(default_factory=dict)
 
 
 class GPUInfo(BaseModel):

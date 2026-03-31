@@ -19,6 +19,7 @@ from lean_ai_serve.engine.router import Router
 from lean_ai_serve.models.downloader import ModelDownloader
 from lean_ai_serve.models.registry import ModelRegistry
 from lean_ai_serve.models.schemas import ModelState
+from lean_ai_serve.observability.logging import setup_logging
 from lean_ai_serve.security.audit import AuditLogger
 from lean_ai_serve.security.auth import load_revoked_tokens
 from lean_ai_serve.security.usage import UsageTracker
@@ -30,6 +31,13 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Startup and shutdown lifecycle."""
     settings = get_settings()
+
+    # Set up structured logging early (before any log output)
+    setup_logging(
+        json_output=settings.logging.json_output,
+        log_level=settings.logging.level,
+    )
+
     logger.info("lean-ai-serve %s starting", __version__)
 
     # --- Startup ---
@@ -71,6 +79,53 @@ async def lifespan(app: FastAPI):
         app.state.ldap_service = ldap_service
         logger.info("LDAP authentication enabled")
 
+    # OIDC validator (if configured)
+    if "oidc" in settings.security.mode.lower():
+        from lean_ai_serve.security.oidc import OIDCValidator
+
+        oidc_validator = OIDCValidator(settings.security.oidc)
+        await oidc_validator.initialize()
+        app.state.oidc_validator = oidc_validator
+        logger.info("OIDC authentication enabled (issuer=%s)", settings.security.oidc.issuer_url)
+
+    # Metrics collector (may already exist from create_app middleware setup)
+    metrics = getattr(app.state, "metrics", None)
+    if settings.metrics.enabled and metrics is None:
+        from lean_ai_serve.observability.metrics import MetricsCollector
+
+        metrics = MetricsCollector()
+        app.state.metrics = metrics
+    if metrics is not None:
+        logger.info("Prometheus metrics enabled")
+
+    # Alert evaluator
+    alert_evaluator = None
+    if settings.alerts.enabled and metrics is not None:
+        from lean_ai_serve.observability.alerts import AlertEvaluator, AlertRule
+
+        rules = None
+        if settings.alerts.rules:
+            rules = [
+                AlertRule(
+                    name=r.name,
+                    metric=r.metric,
+                    condition=r.condition,
+                    threshold=r.threshold,
+                    severity=r.severity,
+                )
+                for r in settings.alerts.rules
+            ]
+        alert_evaluator = AlertEvaluator(metrics, rules=rules)
+        app.state.alert_evaluator = alert_evaluator
+        logger.info("Alert evaluator enabled (%d rules)", len(alert_evaluator._rules))
+
+    # OpenTelemetry tracing (optional dependency)
+    if settings.tracing.enabled:
+        from lean_ai_serve.observability.tracing import setup_tracing
+
+        if setup_tracing(settings.tracing):
+            logger.info("OpenTelemetry tracing enabled")
+
     # Model downloader
     downloader = ModelDownloader()
     app.state.downloader = downloader
@@ -95,6 +150,23 @@ async def lifespan(app: FastAPI):
     lifecycle = LifecycleManager(registry, pm, request_tracker)
     await lifecycle.start()
     app.state.lifecycle_manager = lifecycle
+
+    # Rate limiter (for background scheduler cleanup)
+    rate_limiter = getattr(app.state, "rate_limiter", None)
+
+    # Background scheduler
+    from lean_ai_serve.observability.tasks import BackgroundScheduler
+
+    scheduler = BackgroundScheduler(
+        db,
+        settings,
+        metrics=metrics,
+        rate_limiter=rate_limiter,
+        usage_tracker=usage_tracker,
+        alert_evaluator=alert_evaluator,
+    )
+    await scheduler.start()
+    app.state.background_scheduler = scheduler
 
     # Training subsystem (if enabled)
     if settings.training.enabled:
@@ -149,6 +221,9 @@ async def lifespan(app: FastAPI):
     # --- Shutdown ---
     logger.info("lean-ai-serve shutting down")
 
+    # Stop background scheduler first
+    await scheduler.stop()
+
     # Close adapter registry HTTP client
     adapter_reg = getattr(app.state, "adapter_registry", None)
     if adapter_reg:
@@ -158,6 +233,11 @@ async def lifespan(app: FastAPI):
     ldap_svc = getattr(app.state, "ldap_service", None)
     if ldap_svc:
         await ldap_svc.close()
+
+    # Close OIDC validator
+    oidc_val = getattr(app.state, "oidc_validator", None)
+    if oidc_val:
+        await oidc_val.close()
 
     # Stop lifecycle manager before process manager
     await lifecycle.stop()
@@ -186,6 +266,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
     from lean_ai_serve.api.auth_routes import router as auth_router
     from lean_ai_serve.api.health import router as health_router
     from lean_ai_serve.api.keys import router as keys_router
+    from lean_ai_serve.api.metrics import router as metrics_router
     from lean_ai_serve.api.models import router as models_router
     from lean_ai_serve.api.openai_compat import router as openai_router
     from lean_ai_serve.api.usage import router as usage_router
@@ -197,6 +278,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
     app.include_router(audit_router)
     app.include_router(auth_router)
     app.include_router(usage_router)
+    app.include_router(metrics_router)
 
     # Training router (conditional on config)
     if settings.training.enabled:
@@ -204,13 +286,26 @@ def create_app(config_path: str | None = None) -> FastAPI:
 
         app.include_router(training_router)
 
-    # Content filter middleware (must be added after routers)
+    # Middlewares (order: outermost first = request-id, then metrics, then content filter)
     settings = get_settings()
     if settings.security.content_filtering.enabled:
         from lean_ai_serve.security.content_filter import ContentFilter, ContentFilterMiddleware
 
         cf = ContentFilter(settings.security.content_filtering)
         app.add_middleware(ContentFilterMiddleware, content_filter=cf)
+
+    if settings.metrics.enabled:
+        from lean_ai_serve.observability.metrics import MetricsCollector
+        from lean_ai_serve.observability.middleware import MetricsMiddleware
+
+        # Create collector here so middleware and lifespan share the same instance
+        metrics = MetricsCollector()
+        app.state.metrics = metrics
+        app.add_middleware(MetricsMiddleware, metrics=metrics)
+
+    from lean_ai_serve.observability.logging import RequestIDMiddleware
+
+    app.add_middleware(RequestIDMiddleware)
 
     return app
 
