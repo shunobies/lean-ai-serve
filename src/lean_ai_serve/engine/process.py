@@ -70,6 +70,7 @@ class ProcessManager:
         """Start a vLLM process for the given model.
 
         Returns ProcessInfo once the process is spawned (health checked async).
+        Validates the model config before launching.
         """
         if name in self._processes:
             existing = self._processes[name]
@@ -77,15 +78,27 @@ class ProcessManager:
                 logger.warning("Model %s already running (pid=%d)", name, existing.pid)
                 return existing
 
+        # Pre-start validation
+        from lean_ai_serve.engine.validators import validate_model_config
+
+        validate_model_config(config)
+
         port = get_free_port()
         cmd = self._build_command(name, config, str(model_path), port)
 
         logger.info("Starting vLLM for '%s' on port %d: %s", name, port, " ".join(cmd))
 
+        # Scope GPU visibility to the assigned GPUs
+        import os
+
+        env = os.environ.copy()
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in config.gpu)
+
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
 
         info = ProcessInfo(
@@ -242,6 +255,10 @@ class ProcessManager:
         # KV cache dtype
         if config.kv_cache.dtype != "auto":
             cmd.extend(["--kv-cache-dtype", config.kv_cache.dtype])
+
+        # KV cache scale calculation (for FP8 quantized caches)
+        if config.kv_cache.calculate_scales:
+            cmd.append("--calculate-kv-scales")
 
         # Prefix caching
         if config.context.enable_prefix_caching:

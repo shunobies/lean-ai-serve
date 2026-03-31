@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from lean_ai_serve import __version__
 from lean_ai_serve.config import get_settings, load_settings, set_settings
 from lean_ai_serve.db import Database
+from lean_ai_serve.engine.lifecycle import LifecycleManager, RequestTracker
 from lean_ai_serve.engine.process import ProcessManager
 from lean_ai_serve.engine.proxy import close_proxy_client
 from lean_ai_serve.engine.router import Router
@@ -20,6 +21,7 @@ from lean_ai_serve.models.registry import ModelRegistry
 from lean_ai_serve.models.schemas import ModelState
 from lean_ai_serve.security.audit import AuditLogger
 from lean_ai_serve.security.auth import load_revoked_tokens
+from lean_ai_serve.security.usage import UsageTracker
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +82,19 @@ async def lifespan(app: FastAPI):
     # Router
     router = Router(registry, pm)
     app.state.router = router
+
+    # Request tracker (idle detection for lifecycle management)
+    request_tracker = RequestTracker()
+    app.state.request_tracker = request_tracker
+
+    # Usage tracker
+    usage_tracker = UsageTracker(db)
+    app.state.usage_tracker = usage_tracker
+
+    # Lifecycle manager (idle sleep/wake)
+    lifecycle = LifecycleManager(registry, pm, request_tracker)
+    await lifecycle.start()
+    app.state.lifecycle_manager = lifecycle
 
     # Training subsystem (if enabled)
     if settings.training.enabled:
@@ -144,6 +159,9 @@ async def lifespan(app: FastAPI):
     if ldap_svc:
         await ldap_svc.close()
 
+    # Stop lifecycle manager before process manager
+    await lifecycle.stop()
+
     await pm.close()
     await close_proxy_client()
     await db.close()
@@ -170,6 +188,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
     from lean_ai_serve.api.keys import router as keys_router
     from lean_ai_serve.api.models import router as models_router
     from lean_ai_serve.api.openai_compat import router as openai_router
+    from lean_ai_serve.api.usage import router as usage_router
 
     app.include_router(health_router)
     app.include_router(openai_router)
@@ -177,6 +196,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
     app.include_router(keys_router)
     app.include_router(audit_router)
     app.include_router(auth_router)
+    app.include_router(usage_router)
 
     # Training router (conditional on config)
     if settings.training.enabled:

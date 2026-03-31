@@ -85,10 +85,20 @@ models:
   #   autoload: true
   #   kv_cache:
   #     dtype: "fp8_e4m3"
+  #     calculate_scales: true           # Calculate KV cache scales (for FP8)
   #   context:
   #     enable_prefix_caching: true
+  #     cpu_offload_gb: 0                # GB of KV cache to offload to CPU
+  #     swap_space: 0                    # GiB of CPU swap for KV cache
+  #   speculative:
+  #     enabled: false
+  #     strategy: "draft"                # draft, ngram, eagle
+  #     draft_model: ""
+  #     num_tokens: 5
   #   lifecycle:
-  #     idle_sleep_timeout: 3600
+  #     idle_sleep_timeout: 3600         # Seconds idle before sleeping (0=never)
+  #     sleep_level: 1                   # 1=auto-wakeable, 2=full unload
+  #     auto_wake_on_request: true       # Auto-wake on inference request (level 1 only)
 
 # Training / fine-tuning subsystem
 training:

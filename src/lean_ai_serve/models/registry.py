@@ -151,7 +151,7 @@ class ModelRegistry:
         elif state == ModelState.LOADED:
             updates.append("loaded_at = ?")
             params.append(now)
-        elif state in (ModelState.NOT_DOWNLOADED, ModelState.UNLOADING):
+        elif state in (ModelState.NOT_DOWNLOADED, ModelState.UNLOADING, ModelState.SLEEPING):
             updates.append("port = NULL")
             updates.append("pid = NULL")
 

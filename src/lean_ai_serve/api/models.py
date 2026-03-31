@@ -212,6 +212,75 @@ async def unload_model(
 
 
 # ---------------------------------------------------------------------------
+# POST /api/models/{name}/sleep — put model to sleep
+# ---------------------------------------------------------------------------
+
+
+@router.post("/{name}/sleep")
+async def sleep_model(
+    name: str,
+    request: Request,
+    user: AuthUser = Depends(require_permission("model:deploy")),
+):
+    """Put a loaded model to sleep (stop process, keep downloaded)."""
+    registry = _get_registry(request)
+    pm = _get_pm(request)
+
+    model = await registry.get_model(name)
+    if model is None:
+        raise HTTPException(status_code=404, detail=f"Model not found: {name}")
+    if model.state != ModelState.LOADED:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot sleep model in state: {model.state.value}",
+        )
+
+    config = await registry.get_config(name)
+    level = config.lifecycle.sleep_level if config else 1
+
+    await pm.stop(name)
+
+    # Clear request tracker
+    tracker = getattr(request.app.state, "request_tracker", None)
+    if tracker:
+        tracker.clear(name)
+
+    if level == 1:
+        await registry.set_state(name, ModelState.SLEEPING)
+        return {"status": "sleeping"}
+    else:
+        await registry.set_state(name, ModelState.DOWNLOADED)
+        return {"status": "unloaded"}
+
+
+# ---------------------------------------------------------------------------
+# POST /api/models/{name}/wake — wake a sleeping model
+# ---------------------------------------------------------------------------
+
+
+@router.post("/{name}/wake")
+async def wake_model(
+    name: str,
+    request: Request,
+    user: AuthUser = Depends(require_permission("model:deploy")),
+):
+    """Wake a sleeping model (restart vLLM process)."""
+    lifecycle = getattr(request.app.state, "lifecycle_manager", None)
+    if lifecycle is None:
+        raise HTTPException(
+            status_code=500, detail="Lifecycle manager not initialized"
+        )
+
+    try:
+        await lifecycle.wake_model(name)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+
+    model = await _get_registry(request).get_model(name)
+    return {"status": "loaded", "port": model.port if model else None}
+
+
+# ---------------------------------------------------------------------------
 # DELETE /api/models/{name} — remove model
 # ---------------------------------------------------------------------------
 

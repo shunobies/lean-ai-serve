@@ -129,7 +129,8 @@ class SamplingDefaults(BaseModel):
 
 class LifecycleConfig(BaseModel):
     idle_sleep_timeout: int = 0  # Seconds, 0 = never
-    sleep_level: int = 1  # 1=CPU offload, 2=discard
+    sleep_level: int = 1  # 1=auto-wake capable, 2=full unload
+    auto_wake_on_request: bool = True  # Level 1 only: auto-wake on inference request
 
 
 class ModelConfig(BaseModel):

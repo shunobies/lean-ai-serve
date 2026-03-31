@@ -47,12 +47,27 @@ def start(
 
     settings = _init_settings(config)
 
+    kwargs: dict = {
+        "host": host or settings.server.host,
+        "port": port or settings.server.port,
+        "log_level": "info",
+    }
+
+    # TLS passthrough
+    if settings.server.tls.enabled:
+        if not settings.server.tls.cert_file or not settings.server.tls.key_file:
+            console.print(
+                "[red]TLS enabled but cert_file or key_file not set in config[/red]"
+            )
+            raise typer.Exit(1)
+        kwargs["ssl_certfile"] = settings.server.tls.cert_file
+        kwargs["ssl_keyfile"] = settings.server.tls.key_file
+        console.print("[green]TLS enabled[/green]")
+
     uvicorn.run(
         "lean_ai_serve.main:create_app",
         factory=True,
-        host=host or settings.server.host,
-        port=port or settings.server.port,
-        log_level="info",
+        **kwargs,
     )
 
 
