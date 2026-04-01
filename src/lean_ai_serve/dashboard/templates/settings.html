@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}Settings{% endblock %}
+
+{% block content %}
+<section>
+    <h2>Settings</h2>
+    <p class="muted">Read-only view of the current server configuration. Edit <code>config.yaml</code> and restart to change settings.</p>
+
+    <article>
+        <header><h3>Server</h3></header>
+        <table>
+            <tbody>
+                <tr><td>Host</td><td><code>{{ settings.server.host }}</code></td></tr>
+                <tr><td>Port</td><td><code>{{ settings.server.port }}</code></td></tr>
+                <tr><td>TLS</td><td>{{ "Enabled" if settings.server.tls.enabled else "Disabled" }}</td></tr>
+                <tr>
+                    <td>Uptime</td>
+                    <td>
+                        {% set hours = uptime_seconds // 3600 %}
+                        {% set minutes = (uptime_seconds % 3600) // 60 %}
+                        {{ hours }}h {{ minutes }}m
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </article>
+
+    <article>
+        <header><h3>Security</h3></header>
+        <table>
+            <tbody>
+                <tr><td>Auth Mode</td><td><code>{{ settings.security.mode }}</code></td></tr>
+                <tr><td>JWT Secret</td><td><code>***</code></td></tr>
+                <tr><td>JWT Expiry</td><td>{{ settings.security.jwt_expiry_hours }} hours</td></tr>
+                <tr><td>Content Filtering</td><td>{{ "Enabled" if settings.security.content_filtering.enabled else "Disabled" }}</td></tr>
+            </tbody>
+        </table>
+    </article>
+
+    <article>
+        <header><h3>Audit</h3></header>
+        <table>
+            <tbody>
+                <tr><td>Enabled</td><td>{{ "Yes" if settings.audit.enabled else "No" }}</td></tr>
+                <tr><td>Log Prompts</td><td>{{ "Hash only" if settings.audit.log_prompts_hash_only else ("Yes" if settings.audit.log_prompts else "No") }}</td></tr>
+                <tr><td>Retention</td><td>{{ settings.audit.retention_days }} days</td></tr>
+            </tbody>
+        </table>
+    </article>
+
+    <article>
+        <header><h3>Encryption</h3></header>
+        <table>
+            <tbody>
+                <tr><td>At Rest</td><td>{{ "Enabled" if settings.encryption.at_rest.enabled else "Disabled" }}</td></tr>
+                {% if settings.encryption.at_rest.enabled %}
+                <tr><td>Key Source</td><td><code>{{ settings.encryption.at_rest.key_source }}</code></td></tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </article>
+
+    <article>
+        <header><h3>Training</h3></header>
+        <table>
+            <tbody>
+                <tr><td>Enabled</td><td>{{ "Yes" if settings.training.enabled else "No" }}</td></tr>
+                {% if settings.training.enabled %}
+                <tr><td>Backend</td><td><code>{{ settings.training.backend }}</code></td></tr>
+                <tr><td>Max Concurrent</td><td>{{ settings.training.max_concurrent_jobs }}</td></tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </article>
+
+    <article>
+        <header><h3>Observability</h3></header>
+        <table>
+            <tbody>
+                <tr><td>Metrics</td><td>{{ "Enabled" if settings.metrics.enabled else "Disabled" }}</td></tr>
+                <tr><td>Alerts</td><td>{{ "Enabled" if settings.alerts.enabled else "Disabled" }}</td></tr>
+                <tr><td>Tracing</td><td>{{ "Enabled" if settings.tracing.enabled else "Disabled" }}</td></tr>
+                <tr><td>Logging</td><td>{{ "JSON" if settings.logging.json_output else "Console" }} ({{ settings.logging.level }})</td></tr>
+            </tbody>
+        </table>
+    </article>
+
+    {% if settings.context_compression.enabled %}
+    <article>
+        <header><h3>Context Compression</h3></header>
+        <table>
+            <tbody>
+                <tr><td>Method</td><td><code>{{ settings.context_compression.method }}</code></td></tr>
+                <tr><td>Target Ratio</td><td>{{ settings.context_compression.target_ratio }}</td></tr>
+                <tr><td>Min Length</td><td>{{ settings.context_compression.min_length }}</td></tr>
+            </tbody>
+        </table>
+    </article>
+    {% endif %}
+
+    <article>
+        <header><h3>Dashboard</h3></header>
+        <table>
+            <tbody>
+                <tr><td>Enabled</td><td>{{ "Yes" if settings.dashboard.enabled else "No" }}</td></tr>
+                <tr><td>CSRF Protection</td><td>{{ "Yes" if settings.dashboard.csrf_enabled else "No" }}</td></tr>
+            </tbody>
+        </table>
+    </article>
+</section>
+{% endblock %}

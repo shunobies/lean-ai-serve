@@ -1,0 +1,23 @@
+{% if total is defined and limit is defined and offset is defined %}
+<nav class="pagination">
+    <ul>
+        {% if offset > 0 %}
+        <li>
+            <a href="#" hx-get="{{ url }}&offset={{ offset - limit }}&limit={{ limit }}"
+               hx-target="{{ target }}" hx-swap="innerHTML">
+                &laquo; Previous
+            </a>
+        </li>
+        {% endif %}
+        <li><span>Showing {{ offset + 1 }}–{{ [offset + limit, total]|min }} of {{ total }}</span></li>
+        {% if offset + limit < total %}
+        <li>
+            <a href="#" hx-get="{{ url }}&offset={{ offset + limit }}&limit={{ limit }}"
+               hx-target="{{ target }}" hx-swap="innerHTML">
+                Next &raquo;
+            </a>
+        </li>
+        {% endif %}
+    </ul>
+</nav>
+{% endif %}

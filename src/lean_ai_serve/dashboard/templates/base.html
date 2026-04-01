@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Dashboard{% endblock %} — lean-ai-serve</title>
+    <link rel="stylesheet" href="/static/css/pico.min.css">
+    <link rel="stylesheet" href="/static/css/dashboard.css">
+    <script src="/static/js/htmx.min.js" defer></script>
+    <script src="/static/js/htmx-sse.min.js" defer></script>
+    <script src="/static/js/alpine.min.js" defer></script>
+    {% block head %}{% endblock %}
+</head>
+<body hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}' x-data="{ sidebarOpen: true }">
+    {% include "partials/_navbar.html" %}
+
+    <div class="dashboard-layout">
+        {% include "partials/_sidebar.html" %}
+
+        <main class="dashboard-main">
+            {% block content %}{% endblock %}
+        </main>
+    </div>
+
+    {% include "partials/_toast.html" %}
+    {% include "partials/_confirm_modal.html" %}
+
+    <script src="/static/js/dashboard.js"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

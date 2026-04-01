@@ -1,0 +1,60 @@
+{# Partial: API keys table #}
+{% if new_key is defined and new_key %}
+<article class="new-key-display" role="alert">
+    <header><strong>New API Key Created</strong></header>
+    <p>Copy this key now — it will not be shown again:</p>
+    <div class="key-display" x-data="{ copied: false }">
+        <code id="new-key-value">{{ new_key }}</code>
+        <button class="outline small" @click="navigator.clipboard.writeText('{{ new_key }}'); copied=true; setTimeout(()=>copied=false, 2000)">
+            <span x-show="!copied">Copy</span>
+            <span x-show="copied">Copied!</span>
+        </button>
+    </div>
+</article>
+{% endif %}
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Prefix</th>
+            <th>Role</th>
+            <th>Models</th>
+            <th>Rate Limit</th>
+            <th>Created</th>
+            <th>Last Used</th>
+            <th>Expires</th>
+            {% if '*' in user_permissions %}
+            <th>Actions</th>
+            {% endif %}
+        </tr>
+    </thead>
+    <tbody>
+        {% for key in api_keys %}
+        <tr id="key-row-{{ key.id }}">
+            <td>{{ key.name }}</td>
+            <td><code>{{ key.key_prefix }}...</code></td>
+            <td><span class="badge">{{ key.role }}</span></td>
+            <td>{{ key.models }}</td>
+            <td>{{ key.rate_limit or "∞" }}</td>
+            <td>{{ key.created_at[:10] }}</td>
+            <td>{{ key.last_used_at[:10] if key.last_used_at else "Never" }}</td>
+            <td>{{ key.expires_at[:10] if key.expires_at else "Never" }}</td>
+            {% if '*' in user_permissions %}
+            <td>
+                <button class="outline small contrast"
+                        hx-delete="/dashboard/api/keys/{{ key.id }}"
+                        hx-target="#keys-table-container"
+                        hx-swap="innerHTML"
+                        hx-confirm="Revoke key '{{ key.name }}'?">
+                    Revoke
+                </button>
+            </td>
+            {% endif %}
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% if not api_keys %}
+<p class="muted">No API keys configured.</p>
+{% endif %}

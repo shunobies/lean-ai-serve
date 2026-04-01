@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Login — lean-ai-serve</title>
+    <link rel="stylesheet" href="/static/css/pico.min.css">
+    <link rel="stylesheet" href="/static/css/dashboard.css">
+    <script src="/static/js/alpine.min.js" defer></script>
+</head>
+<body class="login-page">
+    <main class="login-container">
+        <article>
+            <header>
+                <h1>lean-ai-serve</h1>
+                <p>Sign in to the dashboard</p>
+            </header>
+
+            {% if error %}
+            <div role="alert" class="notice notice-error">
+                {% if error == "invalid_key" %}Invalid API key.
+                {% elif error == "invalid_credentials" %}Invalid username or password.
+                {% elif error == "unsupported_auth" %}Authentication method not supported.
+                {% else %}Authentication failed.{% endif %}
+            </div>
+            {% endif %}
+
+            {% if "api_key" in auth_mode %}
+            <form method="post" action="/dashboard/login">
+                <fieldset>
+                    <label for="api_key">
+                        API Key
+                        <input type="password" id="api_key" name="api_key"
+                               placeholder="las-..." required autofocus>
+                    </label>
+                </fieldset>
+                <button type="submit">Sign in with API Key</button>
+            </form>
+            {% endif %}
+
+            {% if "ldap" in auth_mode %}
+            {% if "api_key" in auth_mode %}<hr>{% endif %}
+            <form method="post" action="/dashboard/login">
+                <fieldset>
+                    <label for="username">
+                        Username
+                        <input type="text" id="username" name="username"
+                               placeholder="Enter username" required
+                               {% if "api_key" not in auth_mode %}autofocus{% endif %}>
+                    </label>
+                    <label for="password">
+                        Password
+                        <input type="password" id="password" name="password"
+                               placeholder="Enter password" required>
+                    </label>
+                </fieldset>
+                <button type="submit">Sign in with LDAP</button>
+            </form>
+            {% endif %}
+
+            {% if "oidc" in auth_mode %}
+            {% if "api_key" in auth_mode or "ldap" in auth_mode %}<hr>{% endif %}
+            <a href="/dashboard/oidc/login" role="button" class="outline">
+                Sign in with SSO
+            </a>
+            {% endif %}
+        </article>
+    </main>
+</body>
+</html>

@@ -1,0 +1,60 @@
+{# Partial: datasets list and upload form #}
+{% if 'dataset:upload' in user_permissions or '*' in user_permissions %}
+<article>
+    <header><h3>Upload Dataset</h3></header>
+    <form hx-post="/api/training/datasets"
+          hx-encoding="multipart/form-data"
+          hx-target="#datasets-table"
+          hx-swap="innerHTML">
+        <div class="grid">
+            <label>
+                Name
+                <input type="text" name="name" placeholder="my-dataset" required>
+            </label>
+            <label>
+                Format
+                <select name="format">
+                    <option value="sharegpt">ShareGPT</option>
+                    <option value="alpaca">Alpaca</option>
+                    <option value="jsonl">JSONL</option>
+                    <option value="csv">CSV</option>
+                </select>
+            </label>
+            <label>
+                File
+                <input type="file" name="file" accept=".json,.jsonl,.csv" required>
+            </label>
+        </div>
+        <button type="submit">Upload</button>
+    </form>
+</article>
+{% endif %}
+
+<div id="datasets-table">
+    {% if datasets %}
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Format</th>
+                <th>Rows</th>
+                <th>Size</th>
+                <th>Uploaded</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for ds in datasets %}
+            <tr>
+                <td>{{ ds.name }}</td>
+                <td>{{ ds.format }}</td>
+                <td>{{ ds.row_count|default("—") }}</td>
+                <td>{{ ds.size_bytes|default(0) // 1024 }} KB</td>
+                <td><small>{{ ds.created_at[:10] if ds.created_at else "—" }}</small></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="muted">No datasets uploaded.</p>
+    {% endif %}
+</div>

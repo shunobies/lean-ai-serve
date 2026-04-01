@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}Home{% endblock %}
+
+{% block content %}
+<section>
+    <h2>Dashboard</h2>
+
+    {# KPI Cards #}
+    <div class="grid">
+        <article class="kpi-card">
+            <header>Models Loaded</header>
+            <p class="kpi-value">
+                {{ models|selectattr("state", "equalto", "loaded")|list|length }}
+                <small>/ {{ models|length }}</small>
+            </p>
+        </article>
+        <article class="kpi-card">
+            <header>Request Rate</header>
+            <p class="kpi-value">
+                {{ "%.1f"|format(metrics_summary.get("requests_per_sec", 0)) }}
+                <small>req/s</small>
+            </p>
+        </article>
+        <article class="kpi-card">
+            <header>Active Alerts</header>
+            <p class="kpi-value {% if active_alerts %}kpi-warn{% endif %}">
+                {{ active_alerts|length }}
+            </p>
+        </article>
+        <article class="kpi-card">
+            <header>Uptime</header>
+            <p class="kpi-value">
+                {% set hours = uptime_seconds // 3600 %}
+                {% set minutes = (uptime_seconds % 3600) // 60 %}
+                {{ hours }}h {{ minutes }}m
+            </p>
+        </article>
+    </div>
+
+    {# Model Status Table #}
+    <article>
+        <header><h3>Model Status</h3></header>
+        <div hx-get="/dashboard/api/partials/model-list"
+             hx-trigger="load, every 15s"
+             hx-swap="innerHTML">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>State</th>
+                        <th>GPU</th>
+                        <th>Port</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for model in models %}
+                    <tr>
+                        <td>{{ model.name }}</td>
+                        <td><span class="badge badge-{{ model.state }}">{{ model.state }}</span></td>
+                        <td>{{ model.gpu|default([])|join(", ") }}</td>
+                        <td>{{ model.port or "—" }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </article>
+
+    {# Alerts #}
+    {% if active_alerts %}
+    <article>
+        <header><h3>Active Alerts</h3></header>
+        <div hx-get="/dashboard/api/partials/alerts"
+             hx-trigger="load, every 30s"
+             hx-swap="innerHTML">
+            {% include "monitoring/_alerts.html" %}
+        </div>
+    </article>
+    {% endif %}
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/chart.min.js"></script>
+{% endblock %}

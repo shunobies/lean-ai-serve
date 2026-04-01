@@ -1,0 +1,54 @@
+{# Partial: training job submission form #}
+<article>
+    <header><h3>Submit Training Job</h3></header>
+    <form hx-post="/dashboard/api/training/jobs"
+          hx-target="#jobs-container"
+          hx-swap="innerHTML">
+        <div class="grid">
+            <label>
+                Job Name
+                <input type="text" name="name" placeholder="my-finetune" required>
+            </label>
+            <label>
+                Base Model
+                <select name="base_model" required>
+                    <option value="" disabled selected>Select model...</option>
+                    {% for model in models %}
+                    <option value="{{ model.name }}">{{ model.name }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label>
+                Dataset
+                <select name="dataset" required>
+                    <option value="" disabled selected>Select dataset...</option>
+                    {% for ds in datasets %}
+                    <option value="{{ ds.name }}">{{ ds.name }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+        </div>
+        <details>
+            <summary>Hyperparameters</summary>
+            <div class="grid">
+                <label>
+                    Epochs
+                    <input type="number" name="epochs" value="3" min="1" max="100">
+                </label>
+                <label>
+                    Learning Rate
+                    <input type="number" name="learning_rate" value="0.0002" step="0.0001" min="0">
+                </label>
+                <label>
+                    Batch Size
+                    <input type="number" name="batch_size" value="4" min="1">
+                </label>
+                <label>
+                    LoRA Rank
+                    <input type="number" name="lora_rank" value="16" min="1">
+                </label>
+            </div>
+        </details>
+        <button type="submit">Submit Job</button>
+    </form>
+</article>

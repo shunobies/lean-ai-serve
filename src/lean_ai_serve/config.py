@@ -188,6 +188,12 @@ class ContextCompressionConfig(BaseModel):
     min_length: int = 4096
 
 
+class DashboardConfig(BaseModel):
+    enabled: bool = True
+    session_secret: str = ""  # Auto-generated if empty
+    csrf_enabled: bool = True
+
+
 class DefaultsConfig(BaseModel):
     gpu_memory_utilization: float = 0.90
     max_model_len: int | None = None
@@ -256,6 +262,7 @@ class Settings(BaseModel):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     alerts: AlertConfig = Field(default_factory=AlertConfig)
     tracing: TracingConfig = Field(default_factory=TracingConfig)
+    dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
 
     @model_validator(mode="after")
     def _resolve_paths(self) -> Settings:

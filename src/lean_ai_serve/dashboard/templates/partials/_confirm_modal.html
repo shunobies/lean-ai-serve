@@ -1,0 +1,17 @@
+<dialog id="confirm-modal" x-data="{ open: false, message: '', action: '' }"
+        @confirm-action.window="open=true; message=$event.detail.message; action=$event.detail.action"
+        :open="open">
+    <article>
+        <header>
+            <button aria-label="Close" rel="prev" @click="open=false"></button>
+            <h3>Confirm Action</h3>
+        </header>
+        <p x-text="message"></p>
+        <footer>
+            <button class="secondary" @click="open=false">Cancel</button>
+            <button class="contrast" @click="htmx.ajax(action.method, action.url, {target: action.target, swap: action.swap || 'outerHTML'}); open=false">
+                Confirm
+            </button>
+        </footer>
+    </article>
+</dialog>

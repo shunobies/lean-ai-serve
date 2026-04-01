@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Training{% endblock %}
+
+{% block content %}
+<section x-data="{ tab: 'jobs' }">
+    <h2>Training</h2>
+
+    {# Tab navigation #}
+    <nav class="tab-nav">
+        <ul>
+            <li><button :class="{ 'active': tab === 'jobs' }" @click="tab='jobs'">Jobs</button></li>
+            <li><button :class="{ 'active': tab === 'datasets' }" @click="tab='datasets'">Datasets</button></li>
+            <li><button :class="{ 'active': tab === 'adapters' }" @click="tab='adapters'">Adapters</button></li>
+        </ul>
+    </nav>
+
+    {# Jobs Tab #}
+    <div x-show="tab === 'jobs'">
+        {% if 'training:submit' in user_permissions or '*' in user_permissions %}
+        {% include "training/_submit_form.html" %}
+        {% endif %}
+
+        <div id="jobs-container">
+            {% include "training/_job_card.html" %}
+        </div>
+    </div>
+
+    {# Datasets Tab #}
+    <div x-show="tab === 'datasets'">
+        {% include "training/_datasets.html" %}
+    </div>
+
+    {# Adapters Tab #}
+    <div x-show="tab === 'adapters'">
+        {% include "training/_adapters.html" %}
+    </div>
+</section>
+{% endblock %}

@@ -1,0 +1,11 @@
+{# Partial: model list for HTMX auto-refresh #}
+{% for model in models %}
+    {% with model_name=model.name %}
+        {% include "models/_card.html" %}
+    {% endwith %}
+{% endfor %}
+{% if not models %}
+<article>
+    <p>No models configured. Add models to your <code>config.yaml</code> to get started.</p>
+</article>
+{% endif %}

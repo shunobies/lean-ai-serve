@@ -1,0 +1,40 @@
+<nav class="dashboard-nav">
+    <ul>
+        <li>
+            <button class="sidebar-toggle" @click="sidebarOpen = !sidebarOpen" aria-label="Toggle sidebar">
+                <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+                    <rect y="3" width="20" height="2" rx="1"/>
+                    <rect y="9" width="20" height="2" rx="1"/>
+                    <rect y="15" width="20" height="2" rx="1"/>
+                </svg>
+            </button>
+        </li>
+        <li><strong>lean-ai-serve</strong></li>
+    </ul>
+    <ul>
+        <li x-data="{ darkMode: localStorage.getItem('theme') === 'dark' }"
+            x-init="if(darkMode) document.documentElement.dataset.theme='dark'">
+            <button class="outline contrast icon-btn"
+                    @click="darkMode=!darkMode; document.documentElement.dataset.theme=darkMode?'dark':'light'; localStorage.setItem('theme', darkMode?'dark':'light')"
+                    :aria-label="darkMode ? 'Switch to light mode' : 'Switch to dark mode'">
+                <span x-show="!darkMode">&#9790;</span>
+                <span x-show="darkMode">&#9788;</span>
+            </button>
+        </li>
+        <li>
+            <details class="dropdown" role="list" dir="rtl">
+                <summary aria-haspopup="listbox" role="link" class="outline contrast">
+                    {{ user.display_name }}
+                </summary>
+                <ul role="listbox">
+                    <li><span class="badge">{{ user.roles|join(", ") }}</span></li>
+                    <li>
+                        <form method="post" action="/dashboard/logout" style="margin:0">
+                            <button type="submit" class="outline">Sign out</button>
+                        </form>
+                    </li>
+                </ul>
+            </details>
+        </li>
+    </ul>
+</nav>

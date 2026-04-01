@@ -1,0 +1,52 @@
+{# Partial: training jobs list #}
+{% if jobs %}
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Base Model</th>
+            <th>Dataset</th>
+            <th>State</th>
+            <th>Progress</th>
+            <th>Created</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for job in jobs %}
+        <tr id="job-{{ job.id }}">
+            <td>{{ job.name }}</td>
+            <td>{{ job.base_model }}</td>
+            <td>{{ job.dataset }}</td>
+            <td>
+                <span class="badge badge-training-{{ job.state }}">{{ job.state }}</span>
+            </td>
+            <td>
+                {% if job.state == "running" and job.progress is defined %}
+                <progress value="{{ job.progress }}" max="100">{{ job.progress }}%</progress>
+                <small>{{ job.progress }}%</small>
+                {% elif job.state == "completed" %}
+                <span>Done</span>
+                {% else %}
+                <span>—</span>
+                {% endif %}
+            </td>
+            <td><small>{{ job.created_at[:16] if job.created_at else "—" }}</small></td>
+            <td>
+                {% if job.state in ["queued", "running"] %}
+                <button class="outline small contrast"
+                        hx-post="/dashboard/api/training/jobs/{{ job.id }}/cancel"
+                        hx-target="#jobs-container"
+                        hx-swap="innerHTML"
+                        hx-confirm="Cancel job '{{ job.name }}'?">
+                    Cancel
+                </button>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p class="muted">No training jobs.</p>
+{% endif %}

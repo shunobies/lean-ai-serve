@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Models{% endblock %}
+
+{% block content %}
+<section>
+    <header class="page-header">
+        <h2>Models</h2>
+        {% if 'model:write' in user_permissions or '*' in user_permissions %}
+        <button class="outline" @click="$refs.pullModal.showModal()"
+                x-data x-ref="pullBtn">
+            Pull New Model
+        </button>
+        {% endif %}
+    </header>
+
+    <div id="model-grid" class="model-grid"
+         hx-get="/dashboard/api/partials/model-list"
+         hx-trigger="every 10s"
+         hx-swap="innerHTML">
+        {% for model in models %}
+            {% with model_name=model.name %}
+                {% include "models/_card.html" %}
+            {% endwith %}
+        {% endfor %}
+    </div>
+
+    {# Pull Model Modal #}
+    {% include "models/_pull_modal.html" %}
+</section>
+{% endblock %}

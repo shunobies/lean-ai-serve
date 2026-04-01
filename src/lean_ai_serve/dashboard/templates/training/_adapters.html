@@ -1,0 +1,29 @@
+{# Partial: adapters list #}
+<div id="adapters-table">
+    {% if adapters %}
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Base Model</th>
+                <th>State</th>
+                <th>Training Job</th>
+                <th>Created</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for adapter in adapters %}
+            <tr>
+                <td>{{ adapter.name }}</td>
+                <td>{{ adapter.base_model }}</td>
+                <td><span class="badge">{{ adapter.state }}</span></td>
+                <td>{{ adapter.job_id or "—" }}</td>
+                <td><small>{{ adapter.created_at[:10] if adapter.created_at else "—" }}</small></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="muted">No adapters available.</p>
+    {% endif %}
+</div>

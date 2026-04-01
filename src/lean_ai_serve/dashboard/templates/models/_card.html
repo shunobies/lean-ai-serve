@@ -1,0 +1,50 @@
+<article class="model-card" id="model-card-{{ model.name }}">
+    <header>
+        <h4>{{ model.name }}</h4>
+        <span class="badge badge-{{ model.state }}">{{ model.state }}</span>
+    </header>
+    <div class="model-info">
+        <small>
+            {% if model.source is defined %}Source: {{ model.source }}{% endif %}
+            {% if model.gpu is defined and model.gpu %}| GPU: {{ model.gpu|join(", ") }}{% endif %}
+            {% if model.port %}| Port: {{ model.port }}{% endif %}
+        </small>
+    </div>
+    {% if 'model:deploy' in user_permissions or '*' in user_permissions %}
+    <footer class="model-actions">
+        {% if model.state == "downloaded" or model.state == "error" %}
+        <button class="outline"
+                hx-post="/dashboard/api/models/{{ model.name }}/load"
+                hx-target="#model-card-{{ model.name }}"
+                hx-swap="outerHTML"
+                hx-indicator="#spinner-{{ model.name }}">
+            Load
+        </button>
+        {% elif model.state == "loaded" %}
+        <button class="outline secondary"
+                hx-post="/dashboard/api/models/{{ model.name }}/sleep"
+                hx-target="#model-card-{{ model.name }}"
+                hx-swap="outerHTML"
+                hx-confirm="Sleep model {{ model.name }}?">
+            Sleep
+        </button>
+        <button class="outline contrast"
+                hx-post="/dashboard/api/models/{{ model.name }}/unload"
+                hx-target="#model-card-{{ model.name }}"
+                hx-swap="outerHTML"
+                hx-confirm="Unload model {{ model.name }}?">
+            Unload
+        </button>
+        {% elif model.state == "sleeping" %}
+        <button class="outline"
+                hx-post="/dashboard/api/models/{{ model.name }}/wake"
+                hx-target="#model-card-{{ model.name }}"
+                hx-swap="outerHTML">
+            Wake
+        </button>
+        {% elif model.state == "loading" or model.state == "downloading" %}
+        <span aria-busy="true" id="spinner-{{ model.name }}">Loading...</span>
+        {% endif %}
+    </footer>
+    {% endif %}
+</article>

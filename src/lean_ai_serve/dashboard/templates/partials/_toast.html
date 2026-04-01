@@ -1,0 +1,8 @@
+<div id="toast-container" class="toast-container"
+     x-data="{ toasts: [] }"
+     @show-toast.window="toasts.push({msg: $event.detail.message, type: $event.detail.type || 'info', id: Date.now()}); setTimeout(() => toasts.shift(), 4000)">
+    <template x-for="toast in toasts" :key="toast.id">
+        <div class="toast" :class="'toast-' + toast.type" x-text="toast.msg"
+             x-transition></div>
+    </template>
+</div>

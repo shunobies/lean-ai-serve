@@ -1,0 +1,73 @@
+{# Partial: metrics charts — refreshed by HTMX #}
+<div class="grid">
+    <article>
+        <header><h4>Request Summary</h4></header>
+        <div class="metrics-grid">
+            <div class="metric-item">
+                <span class="metric-label">Total Requests</span>
+                <span class="metric-value">{{ metrics_summary.get("total_requests", 0) }}</span>
+            </div>
+            <div class="metric-item">
+                <span class="metric-label">Error Count</span>
+                <span class="metric-value">{{ metrics_summary.get("error_count", 0) }}</span>
+            </div>
+            <div class="metric-item">
+                <span class="metric-label">Avg Latency</span>
+                <span class="metric-value">{{ "%.0f"|format(metrics_summary.get("avg_latency_ms", 0)) }}ms</span>
+            </div>
+            <div class="metric-item">
+                <span class="metric-label">P95 Latency</span>
+                <span class="metric-value">{{ "%.0f"|format(metrics_summary.get("p95_latency_ms", 0)) }}ms</span>
+            </div>
+        </div>
+    </article>
+    <article>
+        <header><h4>Inference</h4></header>
+        <div class="metrics-grid">
+            <div class="metric-item">
+                <span class="metric-label">Prompt Tokens</span>
+                <span class="metric-value">{{ metrics_summary.get("prompt_tokens", 0) }}</span>
+            </div>
+            <div class="metric-item">
+                <span class="metric-label">Completion Tokens</span>
+                <span class="metric-value">{{ metrics_summary.get("completion_tokens", 0) }}</span>
+            </div>
+            <div class="metric-item">
+                <span class="metric-label">Models Loaded</span>
+                <span class="metric-value">{{ metrics_summary.get("models_loaded", 0) }}</span>
+            </div>
+            <div class="metric-item">
+                <span class="metric-label">Training Jobs</span>
+                <span class="metric-value">{{ metrics_summary.get("training_jobs_active", 0) }}</span>
+            </div>
+        </div>
+    </article>
+</div>
+
+{# GPU Charts (rendered via Chart.js) #}
+{% if metrics_summary.get("gpu_info") %}
+<article>
+    <header><h4>GPU Utilization</h4></header>
+    <div class="gpu-chart-container">
+        {% for gpu in metrics_summary.gpu_info %}
+        <div class="gpu-bar-group">
+            <span class="gpu-label">GPU {{ gpu.index }}</span>
+            <div class="gpu-bars">
+                <div class="gpu-bar">
+                    <label>Memory</label>
+                    <progress value="{{ gpu.memory_used_mb }}" max="{{ gpu.memory_total_mb }}">
+                        {{ "%.0f"|format(gpu.memory_used_mb / gpu.memory_total_mb * 100) }}%
+                    </progress>
+                    <small>{{ "%.1f"|format(gpu.memory_used_mb / 1024) }} / {{ "%.1f"|format(gpu.memory_total_mb / 1024) }} GiB</small>
+                </div>
+                <div class="gpu-bar">
+                    <label>Utilization</label>
+                    <progress value="{{ gpu.utilization_pct }}" max="100">{{ gpu.utilization_pct }}%</progress>
+                    <small>{{ gpu.utilization_pct }}%</small>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</article>
+{% endif %}

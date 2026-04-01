@@ -1,0 +1,32 @@
+{# Partial: audit log entries table #}
+<table>
+    <thead>
+        <tr>
+            <th>Timestamp</th>
+            <th>User</th>
+            <th>Action</th>
+            <th>Model</th>
+            <th>Status</th>
+            <th>IP</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for entry in audit_entries %}
+        <tr>
+            <td><small>{{ entry.timestamp }}</small></td>
+            <td>{{ entry.user_id }}</td>
+            <td>{{ entry.action }}</td>
+            <td>{{ entry.model or "—" }}</td>
+            <td>
+                <span class="badge badge-{{ 'success' if entry.status_code and entry.status_code < 400 else 'error' }}">
+                    {{ entry.status_code or "—" }}
+                </span>
+            </td>
+            <td><small>{{ entry.client_ip or "—" }}</small></td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% if not audit_entries %}
+<p class="muted">No audit log entries found.</p>
+{% endif %}

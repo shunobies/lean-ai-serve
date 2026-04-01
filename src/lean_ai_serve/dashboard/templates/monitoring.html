@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Monitoring{% endblock %}
+
+{% block head %}
+<script src="/static/js/chart.min.js"></script>
+{% endblock %}
+
+{% block content %}
+<section>
+    <h2>Monitoring</h2>
+
+    {# Metrics Charts #}
+    <div id="metrics-section"
+         hx-get="/dashboard/api/partials/metrics"
+         hx-trigger="load, every 30s"
+         hx-swap="innerHTML">
+        {% include "monitoring/_charts.html" %}
+    </div>
+
+    {# Alerts #}
+    <article>
+        <header><h3>Active Alerts</h3></header>
+        <div id="alerts-section"
+             hx-get="/dashboard/api/partials/alerts"
+             hx-trigger="load, every 30s"
+             hx-swap="innerHTML">
+            {% include "monitoring/_alerts.html" %}
+        </div>
+    </article>
+</section>
+{% endblock %}

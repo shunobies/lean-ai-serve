@@ -1,0 +1,35 @@
+<dialog id="pull-modal" x-data="{ open: false }" :open="open"
+        @click.self="open=false">
+    <article>
+        <header>
+            <button aria-label="Close" rel="prev" @click="open=false"></button>
+            <h3>Pull Model from HuggingFace</h3>
+        </header>
+        <form hx-post="/dashboard/api/models/pull" hx-target="#pull-progress" hx-swap="innerHTML">
+            <label for="pull-source">
+                HuggingFace Repo
+                <input type="text" id="pull-source" name="source"
+                       placeholder="e.g. mistralai/Mistral-7B-Instruct-v0.3" required>
+            </label>
+            <label for="pull-name">
+                Model Name (optional)
+                <input type="text" id="pull-name" name="name"
+                       placeholder="Leave empty to use repo name">
+            </label>
+            <button type="submit">Start Pull</button>
+        </form>
+        <div id="pull-progress"></div>
+    </article>
+</dialog>
+
+<script>
+    // Wire the pull button to open the modal
+    document.addEventListener('DOMContentLoaded', () => {
+        const btn = document.querySelector('[x-ref="pullBtn"]');
+        if (btn) {
+            btn.addEventListener('click', () => {
+                document.getElementById('pull-modal').__x.$data.open = true;
+            });
+        }
+    });
+</script>

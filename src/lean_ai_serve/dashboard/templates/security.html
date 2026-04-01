@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}Security{% endblock %}
+
+{% block content %}
+<section x-data="{ tab: 'keys' }">
+    <h2>Security</h2>
+
+    {# Tab navigation #}
+    <nav class="tab-nav">
+        <ul>
+            <li><button :class="{ 'active': tab === 'keys' }" @click="tab='keys'">API Keys</button></li>
+            <li><button :class="{ 'active': tab === 'audit' }" @click="tab='audit'">Audit Logs</button></li>
+        </ul>
+    </nav>
+
+    {# API Keys Tab #}
+    <div x-show="tab === 'keys'">
+        {% if '*' in user_permissions %}
+        <article>
+            <header><h3>Create API Key</h3></header>
+            <form hx-post="/dashboard/api/keys/create"
+                  hx-target="#keys-table-container"
+                  hx-swap="innerHTML">
+                <div class="grid">
+                    <label>
+                        Name
+                        <input type="text" name="name" placeholder="Key name" required>
+                    </label>
+                    <label>
+                        Role
+                        <select name="role">
+                            <option value="user">user</option>
+                            <option value="admin">admin</option>
+                            <option value="model-manager">model-manager</option>
+                            <option value="trainer">trainer</option>
+                            <option value="auditor">auditor</option>
+                            <option value="service-account">service-account</option>
+                        </select>
+                    </label>
+                </div>
+                <div class="grid">
+                    <label>
+                        Models (comma-separated, * for all)
+                        <input type="text" name="models" value="*" placeholder="*">
+                    </label>
+                    <label>
+                        Rate Limit (req/min, 0 = unlimited)
+                        <input type="number" name="rate_limit" value="0" min="0">
+                    </label>
+                    <label>
+                        Expires (days, empty = never)
+                        <input type="number" name="expires_days" min="1" placeholder="Never">
+                    </label>
+                </div>
+                <button type="submit">Create Key</button>
+            </form>
+        </article>
+        {% endif %}
+
+        <div id="keys-table-container">
+            {% include "security/_keys_table.html" %}
+        </div>
+    </div>
+
+    {# Audit Logs Tab #}
+    <div x-show="tab === 'audit'">
+        <article>
+            <header>
+                <h3>Audit Logs</h3>
+            </header>
+            {# Filters #}
+            <form hx-get="/dashboard/api/partials/audit"
+                  hx-target="#audit-table-container"
+                  hx-swap="innerHTML"
+                  class="audit-filters">
+                <div class="grid">
+                    <label>
+                        User
+                        <input type="text" name="user_id" placeholder="Filter by user...">
+                    </label>
+                    <label>
+                        Action
+                        <input type="text" name="action" placeholder="Filter by action...">
+                    </label>
+                    <label>
+                        Model
+                        <input type="text" name="model" placeholder="Filter by model...">
+                    </label>
+                    <label>
+                        &nbsp;
+                        <button type="submit" class="outline">Filter</button>
+                    </label>
+                </div>
+            </form>
+        </article>
+
+        <div id="audit-table-container">
+            {% include "security/_audit_table.html" %}
+        </div>
+    </div>
+</section>
+{% endblock %}

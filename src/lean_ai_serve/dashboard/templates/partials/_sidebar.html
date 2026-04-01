@@ -1,0 +1,58 @@
+<aside class="dashboard-sidebar" :class="{ 'collapsed': !sidebarOpen }">
+    <nav>
+        <ul>
+            <li>
+                <a href="/dashboard/"
+                   class="{% if request.url.path == '/dashboard/' %}active{% endif %}">
+                    <span class="nav-icon">&#9632;</span>
+                    <span class="nav-label">Home</span>
+                </a>
+            </li>
+            {% if 'model:read' in user_permissions or '*' in user_permissions %}
+            <li>
+                <a href="/dashboard/models"
+                   class="{% if '/models' in request.url.path %}active{% endif %}">
+                    <span class="nav-icon">&#9881;</span>
+                    <span class="nav-label">Models</span>
+                </a>
+            </li>
+            {% endif %}
+            {% if training_enabled and ('training:read' in user_permissions or 'training:submit' in user_permissions or '*' in user_permissions) %}
+            <li>
+                <a href="/dashboard/training"
+                   class="{% if '/training' in request.url.path %}active{% endif %}">
+                    <span class="nav-icon">&#9733;</span>
+                    <span class="nav-label">Training</span>
+                </a>
+            </li>
+            {% endif %}
+            {% if 'metrics:read' in user_permissions or '*' in user_permissions %}
+            <li>
+                <a href="/dashboard/monitoring"
+                   class="{% if '/monitoring' in request.url.path %}active{% endif %}">
+                    <span class="nav-icon">&#9636;</span>
+                    <span class="nav-label">Monitoring</span>
+                </a>
+            </li>
+            {% endif %}
+            {% if 'audit:read' in user_permissions or '*' in user_permissions %}
+            <li>
+                <a href="/dashboard/security"
+                   class="{% if '/security' in request.url.path %}active{% endif %}">
+                    <span class="nav-icon">&#9951;</span>
+                    <span class="nav-label">Security</span>
+                </a>
+            </li>
+            {% endif %}
+            {% if '*' in user_permissions %}
+            <li>
+                <a href="/dashboard/settings"
+                   class="{% if '/settings' in request.url.path %}active{% endif %}">
+                    <span class="nav-icon">&#9881;</span>
+                    <span class="nav-label">Settings</span>
+                </a>
+            </li>
+            {% endif %}
+        </ul>
+    </nav>
+</aside>

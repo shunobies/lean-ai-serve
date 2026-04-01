@@ -1,0 +1,33 @@
+{# Partial: active alerts list #}
+{% if active_alerts %}
+<table>
+    <thead>
+        <tr>
+            <th>Severity</th>
+            <th>Name</th>
+            <th>Metric</th>
+            <th>Value</th>
+            <th>Threshold</th>
+            <th>Since</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for alert in active_alerts %}
+        <tr>
+            <td>
+                <span class="badge badge-severity-{{ alert.severity|default('warning') }}">
+                    {{ alert.severity|default("warning") }}
+                </span>
+            </td>
+            <td>{{ alert.name }}</td>
+            <td><code>{{ alert.metric }}</code></td>
+            <td>{{ "%.2f"|format(alert.value|default(0)) }}</td>
+            <td>{{ alert.condition }} {{ alert.threshold }}</td>
+            <td>{{ alert.since|default("—") }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p class="muted">No active alerts.</p>
+{% endif %}

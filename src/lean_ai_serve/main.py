@@ -271,6 +271,8 @@ def create_app(config_path: str | None = None) -> FastAPI:
         settings = load_settings(config_path)
         set_settings(settings)
 
+    settings = get_settings()
+
     app = FastAPI(
         title="lean-ai-serve",
         description="Secure vLLM inference, model management & fine-tuning server",
@@ -303,10 +305,20 @@ def create_app(config_path: str | None = None) -> FastAPI:
 
         app.include_router(training_router)
 
+    # Dashboard UI (opt-in, enabled by default)
+    if settings.dashboard.enabled:
+        from starlette.staticfiles import StaticFiles
+
+        from lean_ai_serve.dashboard import get_static_dir
+        from lean_ai_serve.dashboard.api_views import router as dashboard_api_router
+        from lean_ai_serve.dashboard.routes import router as dashboard_router
+
+        app.include_router(dashboard_router)
+        app.include_router(dashboard_api_router)
+        app.mount("/static", StaticFiles(directory=str(get_static_dir())), name="static")
+
     # Middlewares (order: outermost first)
     # Execution order for incoming requests: request-id → metrics → content-filter → compression
-    settings = get_settings()
-
     if settings.context_compression.enabled:
         from lean_ai_serve.middleware.compression import CompressionMiddleware, ContextCompressor
 
