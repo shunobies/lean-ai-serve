@@ -24,7 +24,8 @@ lean-ai-serve wraps [vLLM](https://github.com/vllm-project/vllm) with enterprise
 | **Observability** | Prometheus metrics (zero-dependency), structured logging (JSON/console), OpenTelemetry tracing, alerting |
 | **Web Dashboard** | Built-in server-rendered UI (HTMX + Jinja2 + Pico CSS) — model management, monitoring, security, training, settings. No Node.js required |
 | **Context Compression** | LLMlingua2 prompt compression for long contexts |
-| **CLI** | Full-featured CLI for all operations — start, pull, load, keys, audit, config, admin, training |
+| **Database** | Pluggable backend: SQLite (default), PostgreSQL, Oracle DB, MySQL — zero-config SQLite or bring your existing infrastructure |
+| **CLI** | Full-featured CLI for all operations — start, pull, load, keys, audit, config, admin, training, db |
 
 ## Architecture
 
@@ -45,7 +46,7 @@ graph LR
         Proxy --> vLLM2["vLLM :port2"]
     end
 
-    Server --> SQLite[("SQLite")]
+    Server --> DB[("Database<br/>(SQLite · PostgreSQL · Oracle · MySQL)")]
     Server --> HF["HuggingFace Hub"]
     Server -.-> Prom["Prometheus"]
 ```
@@ -61,6 +62,11 @@ pip install lean-ai-serve
 
 # With optional features:
 pip install lean-ai-serve[gpu,ldap,vault,compression,training,tracing]
+
+# With a specific database backend:
+pip install lean-ai-serve[postgres]   # PostgreSQL via asyncpg
+pip install lean-ai-serve[oracle]     # Oracle DB via oracledb
+pip install lean-ai-serve[mysql]      # MySQL via aiomysql
 ```
 
 ### 2. Configure
@@ -125,6 +131,7 @@ curl http://localhost:8420/v1/chat/completions \
 | `lean-ai-serve audit ...` | Query and verify audit logs |
 | `lean-ai-serve config ...` | Show, validate, generate-key, encrypt/decrypt values |
 | `lean-ai-serve admin ...` | Audit export, DB stats, token cleanup |
+| `lean-ai-serve db ...` | Database setup and diagnostics (init, check, info) |
 | `lean-ai-serve training ...` | Manage datasets, jobs, and adapters |
 
 See [docs/cli-reference.md](docs/cli-reference.md) for full usage details.
@@ -160,6 +167,9 @@ lean-ai-serve uses extras to keep the base install lightweight:
 
 | Extra | Package | Purpose |
 |-------|---------|---------|
+| `postgres` | asyncpg | PostgreSQL database backend |
+| `oracle` | oracledb | Oracle DB database backend |
+| `mysql` | aiomysql | MySQL database backend |
 | `gpu` | nvidia-ml-py | GPU monitoring and metrics |
 | `ldap` | ldap3 | LDAP/Active Directory authentication |
 | `vault` | hvac | HashiCorp Vault encryption key management |
@@ -171,6 +181,9 @@ lean-ai-serve uses extras to keep the base install lightweight:
 ```bash
 # Install all optional dependencies
 pip install lean-ai-serve[gpu,ldap,vault,compression,training,tracing]
+
+# Example: all features with PostgreSQL
+pip install lean-ai-serve[gpu,ldap,vault,compression,training,tracing,postgres]
 ```
 
 ## Documentation

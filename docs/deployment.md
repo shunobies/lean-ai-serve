@@ -14,6 +14,8 @@ Before deploying to production, verify:
 - [ ] Set `logging.level: "INFO"` (not DEBUG)
 - [ ] Review `audit.retention_days` for your compliance requirements
 - [ ] Configure alerting rules for GPU memory and error rates
+- [ ] Configure `database.url` if using PostgreSQL, Oracle, or MySQL (default is SQLite)
+- [ ] Run `lean-ai-serve db init` if using a non-SQLite database backend
 - [ ] Run `lean-ai-serve check --config config.yaml` to validate
 - [ ] Create API keys for all services and users
 - [ ] Back up the master encryption key securely
@@ -243,17 +245,62 @@ Import the pre-built dashboard from `dashboards/lean-ai-serve.json`:
 2. Upload the JSON file
 3. Select your Prometheus data source
 
+## Database Backend
+
+lean-ai-serve supports pluggable database backends. SQLite is the zero-config default; PostgreSQL, Oracle DB, and MySQL are supported for organizations with existing infrastructure.
+
+### Setup for non-SQLite databases
+
+1. Install the driver extra:
+
+```bash
+pip install lean-ai-serve[postgres]   # PostgreSQL
+pip install lean-ai-serve[oracle]     # Oracle DB
+pip install lean-ai-serve[mysql]      # MySQL
+```
+
+2. Add the `database.url` to your config:
+
+```yaml
+database:
+  url: "postgresql+asyncpg://lean_ai:password@db.corp.com:5432/lean_ai_serve"
+  pool_size: 10
+```
+
+3. Initialize the database (one-time):
+
+```bash
+lean-ai-serve db init -c config.yaml
+```
+
+4. Verify the setup:
+
+```bash
+lean-ai-serve db check -c config.yaml
+lean-ai-serve db info -c config.yaml
+```
+
+### Oracle DB example
+
+```yaml
+database:
+  url: "oracle+oracledb://lean_ai:password@dbhost:1521/?service_name=ORCL"
+  pool_size: 10
+```
+
+The database user needs `CREATE SESSION`, `CREATE TABLE`, and `CREATE SEQUENCE` grants. All tables and indexes are created automatically by `lean-ai-serve db init`.
+
 ## Backup
 
 ### Database location
 
-The SQLite database is at `{cache.directory}/lean_ai_serve.db` (default: `~/.cache/lean-ai-serve/lean_ai_serve.db`).
+For SQLite (default), the database is at `{cache.directory}/lean_ai_serve.db` (default: `~/.cache/lean-ai-serve/lean_ai_serve.db`). For remote databases, use your database vendor's backup tools.
 
 ### Backup strategy
 
 ```bash
-# Check DB size
-lean-ai-serve admin db-stats
+# Check DB info
+lean-ai-serve db info -c config.yaml
 
 # Export audit logs for archival
 lean-ai-serve admin audit-export \
@@ -262,13 +309,16 @@ lean-ai-serve admin audit-export \
 
 # SQLite backup (while server is running)
 sqlite3 ~/.cache/lean-ai-serve/lean_ai_serve.db ".backup /backup/lean_ai_serve_$(date +%Y%m%d).db"
+
+# For PostgreSQL, use pg_dump instead:
+# pg_dump -h db.corp.com -U lean_ai lean_ai_serve > /backup/lean_ai_serve_$(date +%Y%m%d).sql
 ```
 
 ### What to back up
 
 | Item | Location | Frequency |
 |------|----------|-----------|
-| SQLite database | `{cache_dir}/lean_ai_serve.db` | Daily |
+| Database | SQLite file or remote DB (use vendor backup tools) | Daily |
 | Configuration | `config.yaml` | On change |
 | Master encryption key | `/etc/lean-ai-serve/master.key` | Once (secure storage) |
 | Audit exports | As needed | Per retention policy |

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -105,13 +104,13 @@ def pull(
 
     async def _pull():
         from lean_ai_serve.config import ModelConfig, get_settings
-        from lean_ai_serve.db import Database
+        from lean_ai_serve.db import Database, get_database_url
         from lean_ai_serve.models.downloader import ModelDownloader
         from lean_ai_serve.models.registry import ModelRegistry
         from lean_ai_serve.models.schemas import ModelState
 
         settings = get_settings()
-        db = Database(Path(settings.cache.directory) / "lean_ai_serve.db")
+        db = Database(get_database_url(settings))
         await db.connect()
         registry = ModelRegistry(db)
         downloader = ModelDownloader()
@@ -164,11 +163,11 @@ def models(
 
     async def _list():
         from lean_ai_serve.config import get_settings
-        from lean_ai_serve.db import Database
+        from lean_ai_serve.db import Database, get_database_url
         from lean_ai_serve.models.registry import ModelRegistry
 
         settings = get_settings()
-        db = Database(Path(settings.cache.directory) / "lean_ai_serve.db")
+        db = Database(get_database_url(settings))
         await db.connect()
         registry = ModelRegistry(db)
         await registry.sync_from_config(settings.models)
@@ -224,14 +223,14 @@ def load(
 
     async def _load():
         from lean_ai_serve.config import get_settings
-        from lean_ai_serve.db import Database
+        from lean_ai_serve.db import Database, get_database_url
         from lean_ai_serve.engine.process import ProcessManager
         from lean_ai_serve.models.downloader import ModelDownloader
         from lean_ai_serve.models.registry import ModelRegistry
         from lean_ai_serve.models.schemas import ModelState
 
         settings = get_settings()
-        db = Database(Path(settings.cache.directory) / "lean_ai_serve.db")
+        db = Database(get_database_url(settings))
         await db.connect()
         registry = ModelRegistry(db)
         pm = ProcessManager()
@@ -298,13 +297,13 @@ def unload(
 
     async def _unload():
         from lean_ai_serve.config import get_settings
-        from lean_ai_serve.db import Database
+        from lean_ai_serve.db import Database, get_database_url
         from lean_ai_serve.engine.process import ProcessManager
         from lean_ai_serve.models.registry import ModelRegistry
         from lean_ai_serve.models.schemas import ModelState
 
         settings = get_settings()
-        db = Database(Path(settings.cache.directory) / "lean_ai_serve.db")
+        db = Database(get_database_url(settings))
         await db.connect()
         registry = ModelRegistry(db)
         pm = ProcessManager()
@@ -435,6 +434,7 @@ def check(
 from lean_ai_serve.cli.admin import admin_app  # noqa: E402
 from lean_ai_serve.cli.audit import audit_app  # noqa: E402
 from lean_ai_serve.cli.config_cmd import config_app  # noqa: E402
+from lean_ai_serve.cli.db_cmd import db_app  # noqa: E402
 from lean_ai_serve.cli.keys import keys_app  # noqa: E402
 from lean_ai_serve.cli.training import training_app  # noqa: E402
 
@@ -443,6 +443,7 @@ app.add_typer(audit_app, name="audit")
 app.add_typer(training_app, name="training")
 app.add_typer(config_app, name="config")
 app.add_typer(admin_app, name="admin")
+app.add_typer(db_app, name="db")
 
 
 if __name__ == "__main__":

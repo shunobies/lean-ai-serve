@@ -140,7 +140,7 @@ lean-ai-serve start --config config.yaml
 The server will:
 
 1. Load configuration
-2. Connect to the SQLite database
+2. Connect to the database (SQLite by default, or PostgreSQL/Oracle/MySQL if configured)
 3. Initialize authentication, audit logging, and metrics
 4. Start background tasks (GPU monitoring, cleanup, alerts)
 5. Autoload models with `autoload: true`

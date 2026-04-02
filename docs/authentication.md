@@ -22,7 +22,7 @@ security:
 
 ## API Key Authentication
 
-API keys are the simplest auth method. Keys are bcrypt-hashed and stored in the SQLite database.
+API keys are the simplest auth method. Keys are bcrypt-hashed and stored in the database.
 
 ### Creating keys
 
@@ -298,7 +298,7 @@ For LDAP mode, lean-ai-serve manages JWT lifecycle:
 - **Algorithm:** HS256 (HMAC-SHA256)
 - **Secret:** Configurable via `security.jwt_secret` (auto-generated if empty, but sessions won't survive restarts)
 - **Expiry:** Configurable via `security.jwt_expiry_hours` (default: 8 hours)
-- **Revocation:** Revoked tokens stored in SQLite `revoked_tokens` table and in-memory set
+- **Revocation:** Revoked tokens stored in the `revoked_tokens` table and in-memory set
 - **Cleanup:** Background scheduler removes expired revoked tokens hourly
 
 ### Best practices

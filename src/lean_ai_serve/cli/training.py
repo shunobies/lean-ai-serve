@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -23,11 +21,11 @@ def training_datasets(
 
     async def _list():
         from lean_ai_serve.config import get_settings
-        from lean_ai_serve.db import Database
+        from lean_ai_serve.db import Database, get_database_url
         from lean_ai_serve.training.datasets import DatasetManager
 
         settings = get_settings()
-        db = Database(Path(settings.cache.directory) / "lean_ai_serve.db")
+        db = Database(get_database_url(settings))
         await db.connect()
         dm = DatasetManager(db, settings)
 
@@ -68,12 +66,12 @@ def training_jobs(
 
     async def _list():
         from lean_ai_serve.config import get_settings
-        from lean_ai_serve.db import Database
+        from lean_ai_serve.db import Database, get_database_url
         from lean_ai_serve.training.schemas import TrainingJobState
 
         # Minimal orchestrator for DB queries — no backend needed
         settings = get_settings()
-        db = Database(Path(settings.cache.directory) / "lean_ai_serve.db")
+        db = Database(get_database_url(settings))
         await db.connect()
 
         job_state = None
@@ -142,11 +140,11 @@ def training_adapters(
 
     async def _list():
         from lean_ai_serve.config import get_settings
-        from lean_ai_serve.db import Database
+        from lean_ai_serve.db import Database, get_database_url
         from lean_ai_serve.training.adapters import AdapterRegistry
 
         settings = get_settings()
-        db = Database(Path(settings.cache.directory) / "lean_ai_serve.db")
+        db = Database(get_database_url(settings))
         await db.connect()
         reg = AdapterRegistry(db)
 

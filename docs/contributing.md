@@ -33,7 +33,7 @@ lean-ai-serve/
 │   ├── utils/                  # GPU utilities (1 module)
 │   ├── main.py                 # FastAPI app factory + lifespan
 │   ├── config.py               # YAML configuration (Pydantic)
-│   └── db.py                   # Async SQLite wrapper
+│   └── db.py                   # Async database layer (SQLAlchemy Core)
 ├── tests/                      # Test suite (32+ test modules)
 ├── docs/                       # Documentation
 ├── dashboards/                 # Grafana dashboard JSON
@@ -67,7 +67,7 @@ pytest -v
 Tests use `asyncio_mode = "auto"` (from `pyproject.toml`). Key test fixtures in `tests/conftest.py`:
 
 - `settings` — Creates a temporary config with `security.mode = "none"` and a temp cache directory
-- `db` — Fresh in-memory SQLite database per test
+- `db` — Fresh SQLite database per test (via SQLAlchemy async engine)
 - `event_loop` — Session-scoped event loop for all async tests
 
 ### Test organization
@@ -158,7 +158,7 @@ ruff format src/ tests/
 
 ### Async patterns
 
-- All database operations are async (aiosqlite)
+- All database operations are async (SQLAlchemy Core with asyncio)
 - Use `asyncio.create_task()` for fire-and-forget background work
 - Shared state is stored on `app.state` (not global singletons)
 - FastAPI `Depends()` for request-scoped dependency injection

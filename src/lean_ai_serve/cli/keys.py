@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -28,11 +26,11 @@ def keys_create(
 
     async def _create():
         from lean_ai_serve.config import get_settings
-        from lean_ai_serve.db import Database
+        from lean_ai_serve.db import Database, get_database_url
         from lean_ai_serve.security.auth import create_api_key
 
         settings = get_settings()
-        db = Database(Path(settings.cache.directory) / "lean_ai_serve.db")
+        db = Database(get_database_url(settings))
         await db.connect()
 
         allowed_models = [m.strip() for m in models_list.split(",")]
@@ -65,10 +63,10 @@ def keys_list(
 
     async def _list():
         from lean_ai_serve.config import get_settings
-        from lean_ai_serve.db import Database
+        from lean_ai_serve.db import Database, get_database_url
 
         settings = get_settings()
-        db = Database(Path(settings.cache.directory) / "lean_ai_serve.db")
+        db = Database(get_database_url(settings))
         await db.connect()
 
         rows = await db.fetchall("SELECT * FROM api_keys ORDER BY created_at DESC")
@@ -111,10 +109,10 @@ def keys_revoke(
 
     async def _revoke():
         from lean_ai_serve.config import get_settings
-        from lean_ai_serve.db import Database
+        from lean_ai_serve.db import Database, get_database_url
 
         settings = get_settings()
-        db = Database(Path(settings.cache.directory) / "lean_ai_serve.db")
+        db = Database(get_database_url(settings))
         await db.connect()
 
         # Try by ID first, then by prefix

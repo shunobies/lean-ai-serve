@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
 
-from lean_ai_serve.db import Database
+from lean_ai_serve.db import Database, usage_table
 
 logger = logging.getLogger(__name__)
 
@@ -37,19 +37,24 @@ class UsageTracker:
     ) -> None:
         """Record a single request's usage into the hourly bucket."""
         hour = self._current_hour()
-        await self._db.execute(
-            """
-            INSERT INTO usage (hour, user_id, model,
-                               request_count, prompt_tokens, completion_tokens,
-                               total_latency_ms)
-            VALUES (?, ?, ?, 1, ?, ?, ?)
-            ON CONFLICT(hour, user_id, model) DO UPDATE SET
-                request_count = request_count + 1,
-                prompt_tokens = prompt_tokens + excluded.prompt_tokens,
-                completion_tokens = completion_tokens + excluded.completion_tokens,
-                total_latency_ms = total_latency_ms + excluded.total_latency_ms
-            """,
-            (hour, user_id, model, prompt_tokens, completion_tokens, latency_ms),
+        await self._db.upsert_increment(
+            usage_table,
+            values={
+                "hour": hour,
+                "user_id": user_id,
+                "model": model,
+                "request_count": 1,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_latency_ms": latency_ms,
+            },
+            conflict_columns=["hour", "user_id", "model"],
+            increment_columns={
+                "request_count": 1,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_latency_ms": latency_ms,
+            },
         )
         await self._db.commit()
 

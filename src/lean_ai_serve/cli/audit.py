@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -27,11 +25,11 @@ def audit_query(
 
     async def _query():
         from lean_ai_serve.config import get_settings
-        from lean_ai_serve.db import Database
+        from lean_ai_serve.db import Database, get_database_url
         from lean_ai_serve.security.audit import AuditLogger
 
         settings = get_settings()
-        db = Database(Path(settings.cache.directory) / "lean_ai_serve.db")
+        db = Database(get_database_url(settings))
         await db.connect()
 
         audit = AuditLogger(db)
@@ -75,11 +73,11 @@ def audit_verify(
 
     async def _verify():
         from lean_ai_serve.config import get_settings
-        from lean_ai_serve.db import Database
+        from lean_ai_serve.db import Database, get_database_url
         from lean_ai_serve.security.audit import AuditLogger
 
         settings = get_settings()
-        db = Database(Path(settings.cache.directory) / "lean_ai_serve.db")
+        db = Database(get_database_url(settings))
         await db.connect()
 
         audit = AuditLogger(db)

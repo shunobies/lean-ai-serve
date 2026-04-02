@@ -330,6 +330,50 @@ cache:
 
 ---
 
+### `database`
+
+Database backend configuration. lean-ai-serve uses SQLite by default with zero configuration. To use an existing PostgreSQL, Oracle DB, or MySQL instance, set the `url` field and install the corresponding driver extra.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `url` | string | `""` | SQLAlchemy async database URL. Empty string auto-creates a SQLite database in `{cache.directory}/lean_ai_serve.db`. |
+| `pool_size` | int | `5` | Number of persistent connections in the pool. Ignored for SQLite. |
+| `pool_max_overflow` | int | `10` | Maximum overflow connections above `pool_size`. Ignored for SQLite. |
+| `echo` | bool | `false` | Log all SQL statements to the console (debug). |
+
+**Supported URL formats:**
+
+```yaml
+database:
+  # SQLite (default — no config needed):
+  url: "sqlite+aiosqlite:///path/to/db.sqlite"
+
+  # PostgreSQL (requires: pip install lean-ai-serve[postgres]):
+  url: "postgresql+asyncpg://user:pass@localhost:5432/lean_ai_serve"
+
+  # Oracle DB (requires: pip install lean-ai-serve[oracle]):
+  url: "oracle+oracledb://user:pass@host:1521/?service_name=ORCL"
+
+  # MySQL (requires: pip install lean-ai-serve[mysql]):
+  url: "mysql+aiomysql://user:pass@localhost:3306/lean_ai_serve"
+```
+
+**Setup for non-SQLite backends:**
+
+1. Install the driver extra: `pip install lean-ai-serve[postgres]`
+2. Set the `database.url` in your config YAML
+3. Run `lean-ai-serve db init` to create all tables and indexes
+4. Start the server normally
+
+The `database.url` field supports `ENV[]` and `ENC[]` secret patterns for credentials:
+
+```yaml
+database:
+  url: "ENV[DATABASE_URL]"
+```
+
+---
+
 ### `defaults`
 
 Global defaults applied to all models that do not specify their own values.
@@ -658,7 +702,7 @@ models:
     autoload: true
 ```
 
-### Production: OIDC + TLS + Encrypted Secrets + Vault
+### Production: OIDC + TLS + PostgreSQL + Vault
 
 ```yaml
 server:
@@ -668,6 +712,10 @@ server:
     enabled: true
     cert_file: "/etc/ssl/certs/lean-ai.pem"
     key_file: "/etc/ssl/private/lean-ai.key"
+
+database:
+  url: "postgresql+asyncpg://lean_ai:password@db.corp.com:5432/lean_ai_serve"
+  pool_size: 10
 
 security:
   mode: "oidc"

@@ -32,7 +32,8 @@ def settings(tmp_path: Path) -> Settings:
 @pytest.fixture
 async def db(tmp_path: Path) -> Database:
     """Create a test database."""
-    db = Database(tmp_path / "test.db")
+    url = f"sqlite+aiosqlite:///{tmp_path}/test.db"
+    db = Database(url)
     await db.connect()
     yield db
     await db.close()

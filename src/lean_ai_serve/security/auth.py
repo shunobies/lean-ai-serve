@@ -14,7 +14,7 @@ from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from lean_ai_serve.config import get_settings
-from lean_ai_serve.db import Database
+from lean_ai_serve.db import Database, revoked_tokens_table
 from lean_ai_serve.models.schemas import AuthUser
 
 logger = logging.getLogger(__name__)
@@ -43,10 +43,15 @@ async def load_revoked_tokens(db: Database) -> None:
 async def revoke_token(db: Database, jti: str, user_id: str, expires_at: str) -> None:
     """Revoke a JWT by adding its jti to the revocation store."""
     _revoked_tokens.add(jti)
-    await db.execute(
-        "INSERT OR IGNORE INTO revoked_tokens (jti, user_id, revoked_at, expires_at) "
-        "VALUES (?, ?, ?, ?)",
-        (jti, user_id, datetime.now(UTC).isoformat(), expires_at),
+    await db.upsert(
+        revoked_tokens_table,
+        {
+            "jti": jti,
+            "user_id": user_id,
+            "revoked_at": datetime.now(UTC).isoformat(),
+            "expires_at": expires_at,
+        },
+        on_conflict="ignore",
     )
     await db.commit()
 

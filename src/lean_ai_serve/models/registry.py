@@ -1,4 +1,4 @@
-"""Model registry — tracks model state and persists to SQLite."""
+"""Model registry — tracks model state and persists to the database."""
 
 from __future__ import annotations
 
@@ -7,14 +7,14 @@ import logging
 from datetime import UTC, datetime
 
 from lean_ai_serve.config import ModelConfig
-from lean_ai_serve.db import Database
+from lean_ai_serve.db import Database, models_table
 from lean_ai_serve.models.schemas import ModelInfo, ModelState
 
 logger = logging.getLogger(__name__)
 
 
 class ModelRegistry:
-    """Manages model lifecycle state in SQLite."""
+    """Manages model lifecycle state in the database."""
 
     def __init__(self, db: Database):
         self._db = db
@@ -169,12 +169,16 @@ class ModelRegistry:
         state: ModelState = ModelState.NOT_DOWNLOADED,
     ) -> None:
         """Register a new model (e.g., after pull)."""
-        await self._db.execute(
-            """
-            INSERT OR REPLACE INTO models (name, source, state, gpu_assignment, config_json)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (name, source, state.value, json.dumps(config.gpu), config.model_dump_json()),
+        await self._db.upsert(
+            models_table,
+            {
+                "name": name,
+                "source": source,
+                "state": state.value,
+                "gpu_assignment": json.dumps(config.gpu),
+                "config_json": config.model_dump_json(),
+            },
+            on_conflict="replace",
         )
         await self._db.commit()
 

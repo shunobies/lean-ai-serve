@@ -90,6 +90,21 @@ encryption:
     # vault_secret_id_env: "VAULT_SECRET_ID"  # Env var for AppRole secret ID
     # vault_cache_ttl: 300           # Seconds to cache the fetched key
 
+# --- Database ---
+# Pluggable backend: SQLite (default), PostgreSQL, Oracle DB, MySQL.
+# Leave url empty for auto-configured SQLite in the cache directory.
+
+database:
+  url: ""                              # SQLAlchemy async URL (see examples below)
+  # url: "sqlite+aiosqlite:///path/to/db.sqlite"
+  # url: "postgresql+asyncpg://user:pass@localhost:5432/lean_ai_serve"
+  # url: "oracle+oracledb://user:pass@host:1521/?service_name=ORCL"
+  # url: "mysql+aiomysql://user:pass@localhost:3306/lean_ai_serve"
+  # url: "ENV[DATABASE_URL]"           # Read URL from environment variable
+  pool_size: 5                         # Connection pool size (ignored for SQLite)
+  pool_max_overflow: 10                # Max overflow connections (ignored for SQLite)
+  echo: false                          # Log all SQL statements (debug)
+
 cache:
   directory: "~/.cache/lean-ai-serve"
   huggingface_token: ""              # Or: "ENV[HF_TOKEN]" / "ENC[base64...]"

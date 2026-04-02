@@ -828,6 +828,133 @@ lean-ai-serve admin db-stats -c config.yaml
 
 ---
 
+## `db` Subcommands
+
+Database setup and diagnostics.
+
+```
+lean-ai-serve db COMMAND [OPTIONS]
+```
+
+### `db init`
+
+Initialize the database — create all tables and indexes.
+
+```
+lean-ai-serve db init [OPTIONS]
+```
+
+Connects to the configured database backend, creates all tables and indexes using
+SQLAlchemy's `metadata.create_all()`, and reports success. For SQLite this happens
+automatically on startup, but for PostgreSQL, Oracle, or MySQL you should run this
+once after configuring your `database.url`.
+
+**Options:**
+
+| Option | Short | Type | Default | Description |
+|--------|-------|------|---------|-------------|
+| `--config` | `-c` | TEXT | `None` | Path to config.yaml |
+
+**Example:**
+
+```bash
+lean-ai-serve db init -c config.yaml
+```
+
+```
+Connected to postgresql database
+  Created/verified 8 tables
+Database ready.
+```
+
+---
+
+### `db check`
+
+Verify that all expected tables exist in the database.
+
+```
+lean-ai-serve db check [OPTIONS]
+```
+
+Inspects the database schema and reports any missing tables. Useful after upgrades
+or when troubleshooting database issues.
+
+**Options:**
+
+| Option | Short | Type | Default | Description |
+|--------|-------|------|---------|-------------|
+| `--config` | `-c` | TEXT | `None` | Path to config.yaml |
+
+**Example:**
+
+```bash
+lean-ai-serve db check -c config.yaml
+```
+
+```
+All 8 tables present
+```
+
+If tables are missing:
+
+```
+Found 6/8 tables
+  Missing: training_jobs
+  Missing: datasets
+
+Run 'lean-ai-serve db init' to create missing tables.
+```
+
+---
+
+### `db info`
+
+Show database connection info and table row counts.
+
+```
+lean-ai-serve db info [OPTIONS]
+```
+
+Displays the database backend type, file path (for SQLite), file size, and row
+counts for all tracked tables.
+
+**Options:**
+
+| Option | Short | Type | Default | Description |
+|--------|-------|------|---------|-------------|
+| `--config` | `-c` | TEXT | `None` | Path to config.yaml |
+
+**Example:**
+
+```bash
+lean-ai-serve db info -c config.yaml
+```
+
+```
+  Backend:  sqlite
+  Path:     /home/user/.cache/lean-ai-serve/lean_ai_serve.db
+  Size:     1.4 MB
+
+          Tables
+┌────────────────┬──────┐
+│ Table          │ Rows │
+├────────────────┼──────┤
+│ models         │    3 │
+│ api_keys       │    5 │
+│ audit_log      │ 1247 │
+│ usage          │  892 │
+│ adapters       │    2 │
+│ training_jobs  │    4 │
+│ datasets       │    6 │
+│ revoked_tokens │   12 │
+└────────────────┴──────┘
+
+  Total rows: 2171
+```
+
+---
+
 ## `training` Subcommands
 
 Manage training jobs, datasets, and adapters.

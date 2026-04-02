@@ -99,6 +99,13 @@ class EncryptionConfig(BaseModel):
     at_rest: EncryptionAtRestConfig = Field(default_factory=EncryptionAtRestConfig)
 
 
+class DatabaseConfig(BaseModel):
+    url: str = ""  # SQLAlchemy async URL; empty = SQLite in cache directory
+    pool_size: int = 5
+    pool_max_overflow: int = 10
+    echo: bool = False  # Log SQL statements (debug)
+
+
 class CacheConfig(BaseModel):
     directory: str = "~/.cache/lean-ai-serve"
     huggingface_token: str = ""
@@ -248,6 +255,7 @@ class Settings(BaseModel):
     """
 
     server: ServerConfig = Field(default_factory=ServerConfig)
+    database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     audit: AuditConfig = Field(default_factory=AuditConfig)
     encryption: EncryptionConfig = Field(default_factory=EncryptionConfig)

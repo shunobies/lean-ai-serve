@@ -53,7 +53,7 @@ graph TB
     end
 
     subgraph Data Stores
-        SQLite[("SQLite DB")]
+        DB[("Database<br/>(SQLite · PostgreSQL · Oracle · MySQL)")]
         HF["HuggingFace Hub"]
         Vault["HashiCorp Vault"]
     end
@@ -63,9 +63,9 @@ graph TB
         OTel["OTLP Collector"]
     end
 
-    Registry --> SQLite
-    Orch --> SQLite
-    AuthMod --> SQLite
+    Registry --> DB
+    Orch --> DB
+    AuthMod --> DB
     HAPI --> Prom
     Server -.-> OTel
 ```
@@ -250,7 +250,7 @@ sequenceDiagram
     UV->>LS: Enter lifespan
 
     LS->>LS: Setup structured logging
-    LS->>LS: Connect SQLite database
+    LS->>LS: Connect database (SQLite/PostgreSQL/Oracle/MySQL)
     LS->>LS: Sync model registry from config
 
     opt encryption.at_rest.enabled
@@ -314,13 +314,14 @@ sequenceDiagram
 | | `audit.py` | Audit query and verify subcommands |
 | | `config_cmd.py` | Config show, validate, encrypt/decrypt subcommands |
 | | `admin.py` | Admin tasks (audit-export, db-stats, token-cleanup) |
+| | `db_cmd.py` | Database setup/diagnostics subcommands (init, check, info) |
 | | `training.py` | Training CLI subcommands |
 | `engine/` | `process.py` | vLLM subprocess lifecycle (start, stop, health check) |
 | | `proxy.py` | HTTP reverse proxy to vLLM (streaming + non-streaming) |
 | | `router.py` | Model name → port resolution |
 | | `lifecycle.py` | Idle sleep/wake daemon + request tracking |
 | | `validators.py` | Configuration validation (GPU, speculative decoding) |
-| `models/` | `registry.py` | Model state persistence (SQLite) |
+| `models/` | `registry.py` | Model state persistence (database) |
 | | `downloader.py` | HuggingFace Hub download with progress streaming |
 | | `schemas.py` | Pydantic models for API request/response types |
 | `security/` | `auth.py` | Authentication dispatch (API key, JWT, LDAP, OIDC) |
@@ -353,7 +354,7 @@ sequenceDiagram
 | `utils/` | `gpu.py` | NVIDIA GPU introspection via nvidia-ml-py |
 | Root | `main.py` | FastAPI app factory and lifespan management |
 | | `config.py` | YAML configuration system (Pydantic) |
-| | `db.py` | Async SQLite database layer |
+| | `db.py` | Async database layer (SQLAlchemy Core — SQLite, PostgreSQL, Oracle, MySQL) |
 
 ## Source Tree
 
@@ -362,7 +363,7 @@ src/lean_ai_serve/
 ├── __init__.py                 # Package version
 ├── main.py                     # FastAPI app factory + lifespan
 ├── config.py                   # YAML config → Pydantic models
-├── db.py                       # Async SQLite wrapper
+├── db.py                       # Async database layer (SQLAlchemy Core)
 ├── api/                        # HTTP route handlers
 │   ├── openai_compat.py        # /v1/chat/completions, /v1/completions, etc.
 │   ├── models.py               # /api/models/* (CRUD + lifecycle)
@@ -379,6 +380,7 @@ src/lean_ai_serve/
 │   ├── audit.py                # audit query/verify
 │   ├── config_cmd.py           # config show/validate/generate-key/encrypt-value
 │   ├── admin.py                # admin audit-verify/audit-export/db-stats/token-cleanup
+│   ├── db_cmd.py               # db init/check/info
 │   └── training.py             # training datasets/jobs/adapters
 ├── engine/                     # vLLM process management
 │   ├── process.py              # Subprocess lifecycle
@@ -387,7 +389,7 @@ src/lean_ai_serve/
 │   ├── lifecycle.py            # Idle sleep/wake daemon
 │   └── validators.py           # Pre-flight config validation
 ├── models/                     # Model management
-│   ├── registry.py             # State persistence (SQLite)
+│   ├── registry.py             # State persistence (database)
 │   ├── downloader.py           # HuggingFace download
 │   └── schemas.py              # Pydantic schemas
 ├── security/                   # Authentication & compliance
@@ -440,7 +442,7 @@ src/lean_ai_serve/
 
 ## Database Schema
 
-lean-ai-serve uses SQLite for all persistent state. Tables:
+lean-ai-serve uses a pluggable database backend via SQLAlchemy Core. SQLite is the zero-config default; PostgreSQL, Oracle DB, and MySQL are supported by setting `database.url` in the config and installing the corresponding driver extra. Tables:
 
 | Table | Purpose | Key Columns |
 |-------|---------|-------------|

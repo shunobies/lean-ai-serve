@@ -18,13 +18,11 @@ console = Console()
 
 def _get_db():
     """Create a database connection from current settings."""
-    from pathlib import Path
-
     from lean_ai_serve.config import get_settings
-    from lean_ai_serve.db import Database
+    from lean_ai_serve.db import Database, get_database_url
 
     settings = get_settings()
-    return Database(Path(settings.cache.directory) / "lean_ai_serve.db")
+    return Database(get_database_url(settings))
 
 
 # ---------------------------------------------------------------------------
@@ -174,15 +172,23 @@ def db_stats(
             total += count
             table.add_row(tbl, str(count))
 
-        # DB file size
-        db_size = db._db_path.stat().st_size if db._db_path.exists() else 0
         await db.close()
 
         console.print(table)
         console.print(f"\n  Total rows: {total}")
-        if db_size > 1024 * 1024:
-            console.print(f"  DB file size: {db_size / (1024*1024):.1f} MB")
+
+        # Show file size for SQLite only
+        if db.dialect == "sqlite" and "///" in db.url:
+            from pathlib import Path
+
+            db_path = Path(db.url.split("///", 1)[-1])
+            if db_path.exists():
+                db_size = db_path.stat().st_size
+                if db_size > 1024 * 1024:
+                    console.print(f"  DB file size: {db_size / (1024*1024):.1f} MB")
+                else:
+                    console.print(f"  DB file size: {db_size / 1024:.1f} KB")
         else:
-            console.print(f"  DB file size: {db_size / 1024:.1f} KB")
+            console.print(f"  Backend: {db.dialect}")
 
     _run(_stats())

@@ -6,13 +6,12 @@ import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from fastapi import FastAPI
 
 from lean_ai_serve import __version__
 from lean_ai_serve.config import get_settings, load_settings, set_settings
-from lean_ai_serve.db import Database
+from lean_ai_serve.db import Database, get_database_url
 from lean_ai_serve.engine.lifecycle import LifecycleManager, RequestTracker
 from lean_ai_serve.engine.process import ProcessManager
 from lean_ai_serve.engine.proxy import close_proxy_client
@@ -44,9 +43,7 @@ async def lifespan(app: FastAPI):
     # --- Startup ---
 
     # Database
-    cache_dir = Path(settings.cache.directory)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    db = Database(cache_dir / "lean_ai_serve.db")
+    db = Database(get_database_url(settings))
     await db.connect()
     app.state.db = db
 
