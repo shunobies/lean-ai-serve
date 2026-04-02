@@ -336,3 +336,11 @@ Common environment variables for deployment:
 | `VAULT_TOKEN` | Vault authentication token |
 | `VAULT_ROLE_ID` | Vault AppRole role ID |
 | `VAULT_SECRET_ID` | Vault AppRole secret ID |
+
+## Cloud-Specific Deployment Guides
+
+For deploying lean-ai-serve on major cloud providers with managed services:
+
+- [Azure Deployment](deploy-azure.md) -- GPU VMs or AKS, Azure Database for PostgreSQL, Key Vault, Azure AD
+- [AWS Deployment](deploy-aws.md) -- EC2/EKS with GPU, Amazon RDS, Secrets Manager, Cognito
+- [GCP Deployment](deploy-gcp.md) -- Compute Engine/GKE, Cloud SQL, Secret Manager, Cloud Identity

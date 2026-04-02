@@ -201,6 +201,9 @@ pip install lean-ai-serve[gpu,ldap,vault,compression,training,tracing,postgres]
 | [Training Guide](docs/training-guide.md) | Datasets, LoRA fine-tuning, adapter deployment |
 | [Observability](docs/observability.md) | Metrics, logging, tracing, alerting |
 | [Deployment](docs/deployment.md) | Production checklist, systemd, Docker, nginx |
+| [Azure Deployment](docs/deploy-azure.md) | GPU VMs, AKS, Key Vault, Azure AD, Application Gateway |
+| [AWS Deployment](docs/deploy-aws.md) | EC2/EKS with GPU, RDS, Secrets Manager, ALB, Cognito |
+| [GCP Deployment](docs/deploy-gcp.md) | Compute Engine/GKE, Cloud SQL, Secret Manager, Cloud LB |
 | [Contributing](docs/contributing.md) | Development setup, testing, code structure |
 
 ## License
