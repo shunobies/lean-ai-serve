@@ -7,6 +7,66 @@ Authenticated endpoints require an `Authorization: Bearer <token>` header.
 
 ---
 
+## Client Libraries
+
+lean-ai-serve exposes a fully **OpenAI-compatible API**, so any OpenAI SDK or client library works out of the box — just point the base URL to your lean-ai-serve instance.
+
+### lean-ai (recommended)
+
+[**lean-ai**](https://github.com/shunobies/lean-ai) is the companion agentic coding assistant that integrates natively with lean-ai-serve. Instead of writing custom HTTP handlers, lean-ai provides a full-featured AI development environment with a VS Code extension, multi-turn planning workflows, codebase indexing, and tool-augmented code generation — all backed by models served from lean-ai-serve.
+
+**Setup:**
+
+```bash
+# Install lean-ai backend
+cd lean-ai/backend
+pip install -e ".[dev,openai]"
+```
+
+**Configure lean-ai-serve as the LLM provider** in lean-ai's `config.yaml`:
+
+```yaml
+# Use lean-ai-serve as the primary provider
+llm_provider: serve
+serve_url: "http://localhost:8420"
+serve_api_key: "las-your-api-key"
+serve_model: "qwen3-coder-30b"
+serve_temperature: 0.7
+
+# Or use it as the expert model alongside a local model
+llm_provider: ollama
+ollama_model: "qwen3-coder:8b"
+expert_llm_provider: serve
+serve_api_key: "las-your-api-key"
+serve_expert_model: "qwen3-coder-30b"
+```
+
+See the [lean-ai README](https://github.com/shunobies/lean-ai) for full documentation.
+
+### OpenAI SDK
+
+Any OpenAI-compatible client works by setting the base URL:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:8420/v1",
+    api_key="las-your-api-key",
+)
+
+response = client.chat.completions.create(
+    model="qwen3-coder-30b",
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+```
+
+### curl
+
+All examples in this reference use curl. See individual endpoint sections below.
+
+---
+
 ## Error Responses
 
 All endpoints return errors in a consistent format:
