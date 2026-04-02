@@ -617,6 +617,29 @@ context_compression:
 
 ---
 
+### `dashboard`
+
+Built-in web dashboard configuration. The dashboard provides a server-rendered UI (HTMX + Jinja2 + Pico CSS) for model management, monitoring, security, training, and settings. No Node.js or build step required.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `true` | Enable the web dashboard UI at `/dashboard/`. |
+| `session_secret` | string | `""` | HMAC secret for deriving CSRF tokens from session JWTs. Auto-generated at startup if empty (tokens will not survive restarts). |
+| `csrf_enabled` | bool | `true` | Require CSRF tokens on all state-changing dashboard requests (POST, DELETE). |
+
+```yaml
+dashboard:
+  enabled: true
+  session_secret: "ENV[DASHBOARD_SESSION_SECRET]"
+  csrf_enabled: true
+```
+
+The dashboard reuses the existing authentication system. Users log in at `/dashboard/login` using their API key (or LDAP/OIDC credentials depending on `security.mode`). Sessions are stored as HTTP-only, SameSite=Strict cookies containing a JWT.
+
+Dashboard pages are role-gated using the same RBAC permissions as the API. For example, only users with `admin` or `model-manager` roles can load/unload models from the UI.
+
+---
+
 ## Common Configuration Examples
 
 ### Minimal: Single GPU, API Key Auth

@@ -17,6 +17,8 @@ Before deploying to production, verify:
 - [ ] Run `lean-ai-serve check --config config.yaml` to validate
 - [ ] Create API keys for all services and users
 - [ ] Back up the master encryption key securely
+- [ ] Set `dashboard.session_secret` explicitly (use `ENV[]` or `ENC[]`) so CSRF tokens survive restarts
+- [ ] Disable the dashboard in headless/API-only deployments: `dashboard.enabled: false`
 
 ## TLS Configuration
 
@@ -187,6 +189,22 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header Connection "";
         proxy_http_version 1.1;
+    }
+
+    # Web dashboard (session cookie auth, serves HTML + static assets)
+    location /dashboard/ {
+        proxy_pass http://lean_ai_serve;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Dashboard static assets (cache-friendly)
+    location /static/ {
+        proxy_pass http://lean_ai_serve;
+        expires 7d;
+        add_header Cache-Control "public, immutable";
     }
 
     # Health check endpoint (no auth, for load balancer)

@@ -171,3 +171,12 @@ context_compression:
   method: "llmlingua2"               # Compression algorithm
   target_ratio: 0.5                  # Target compression ratio (0.0-1.0, lower = more compression)
   min_length: 4096                   # Skip compression for prompts shorter than this (chars)
+
+# --- Web Dashboard ---
+# Built-in server-rendered dashboard (HTMX + Jinja2 + Pico CSS).
+# Access at http://localhost:8420/dashboard/ when enabled.
+
+dashboard:
+  enabled: true                      # Serve the web dashboard UI
+  session_secret: ""                 # HMAC secret for CSRF tokens (auto-generated if empty)
+  csrf_enabled: true                 # Require CSRF tokens on state-changing requests

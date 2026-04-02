@@ -28,6 +28,7 @@ graph TB
         Routes --> KAPI["/api/keys/* — API Keys"]
         Routes --> UAPI["/api/usage/* — Usage"]
         Routes --> HAPI["/health, /metrics"]
+        Routes --> DASH["/dashboard/* — Web UI"]
 
         OAI --> Router["Router"]
         Router --> Proxy["Reverse Proxy"]
@@ -339,6 +340,10 @@ sequenceDiagram
 | | `alerts.py` | Rule-based alert evaluation |
 | | `tasks.py` | Background scheduler (7 periodic tasks) |
 | | `tracing.py` | OpenTelemetry integration |
+| `dashboard/` | `__init__.py` | Package marker with path helpers for templates and static directories |
+| | `routes.py` | Full page routes (`/dashboard/*`): login, logout, home, models, monitoring, security, training, settings |
+| | `api_views.py` | HTMX partial-response endpoints (`/dashboard/api/*`): model actions, metrics, keys, audit, training fragments |
+| | `dependencies.py` | Cookie-based session auth, CSRF token generation/verification, template context builder |
 | `middleware/` | `compression.py` | LLMlingua2 context compression |
 | `training/` | `orchestrator.py` | Training job lifecycle and GPU scheduling |
 | | `backend.py` | Training backend abstraction (LLaMA-Factory) |
@@ -404,6 +409,23 @@ src/lean_ai_serve/
 │   ├── alerts.py               # Alert rule evaluator
 │   ├── tasks.py                # Background scheduler
 │   └── tracing.py              # OpenTelemetry setup
+├── dashboard/                  # Built-in web dashboard (HTMX + Jinja2)
+│   ├── __init__.py             # Path helpers for templates/ and static/
+│   ├── routes.py               # Page routes (login, home, models, monitoring, etc.)
+│   ├── api_views.py            # HTMX partial endpoints (HTML fragment responses)
+│   ├── dependencies.py         # Session auth, CSRF, template context
+│   ├── templates/              # Jinja2 HTML templates
+│   │   ├── base.html           # Master layout (nav, sidebar, HTMX bootstrap)
+│   │   ├── login.html          # Login page (API key / LDAP / OIDC)
+│   │   ├── home.html           # Overview: KPIs, model status, alerts
+│   │   ├── models.html         # Model grid with load/unload actions
+│   │   ├── monitoring.html     # Charts and alerts
+│   │   ├── security.html       # API keys and audit logs
+│   │   ├── training.html       # Jobs, datasets, adapters
+│   │   └── settings.html       # Read-only config view
+│   └── static/                 # Vendored JS/CSS (no CDN, works air-gapped)
+│       ├── css/                # Pico CSS + custom dashboard styles
+│       └── js/                 # HTMX, Alpine.js, Chart.js, dashboard.js
 ├── middleware/                  # HTTP middleware
 │   └── compression.py          # LLMlingua2 context compression
 ├── training/                   # Fine-tuning subsystem

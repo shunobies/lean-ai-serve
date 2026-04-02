@@ -257,6 +257,36 @@ curl http://localhost:8420/health
 }
 ```
 
+## Access the Web Dashboard
+
+lean-ai-serve includes a built-in web dashboard for managing models, monitoring metrics, and administering API keys — all from your browser.
+
+The dashboard is enabled by default. Once the server is running, visit:
+
+```
+http://localhost:8420/dashboard/
+```
+
+You will be redirected to the login page. Authenticate using your API key (or LDAP/OIDC credentials, depending on your `security.mode`).
+
+The dashboard provides:
+
+- **Home** — Health status, KPI cards, model overview, active alerts
+- **Models** — Load, unload, sleep, and wake models with one click
+- **Monitoring** — Request rate, latency, GPU utilization charts
+- **Security** — Create and revoke API keys, browse audit logs
+- **Training** — Submit fine-tuning jobs, manage datasets and adapters (when `training.enabled: true`)
+- **Settings** — Read-only view of the current server configuration (secrets masked)
+
+All dashboard pages are role-gated — users only see sections permitted by their RBAC role.
+
+To disable the dashboard, set `dashboard.enabled: false` in your config:
+
+```yaml
+dashboard:
+  enabled: false
+```
+
 ## Next Steps
 
 - [Configuration](configuration.md) — Full config reference with all options

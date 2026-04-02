@@ -22,6 +22,7 @@ lean-ai-serve wraps [vLLM](https://github.com/vllm-project/vllm) with enterprise
 | **Content Safety** | PHI/PII pattern detection with warn/redact/block actions |
 | **Fine-Tuning** | LoRA training via LLaMA-Factory, dataset management, adapter deployment to running models |
 | **Observability** | Prometheus metrics (zero-dependency), structured logging (JSON/console), OpenTelemetry tracing, alerting |
+| **Web Dashboard** | Built-in server-rendered UI (HTMX + Jinja2 + Pico CSS) — model management, monitoring, security, training, settings. No Node.js required |
 | **Context Compression** | LLMlingua2 prompt compression for long contexts |
 | **CLI** | Full-featured CLI for all operations — start, pull, load, keys, audit, config, admin, training |
 
@@ -38,6 +39,7 @@ graph LR
         Router --> Proxy["Reverse Proxy"]
         Router --> Models["Model Mgmt"]
         Router --> Training["Training"]
+        Router --> Dash["Dashboard UI"]
 
         Proxy --> vLLM1["vLLM :port1"]
         Proxy --> vLLM2["vLLM :port2"]
@@ -148,6 +150,7 @@ See [docs/cli-reference.md](docs/cli-reference.md) for full usage details.
 | `GET /api/audit/logs` | Query audit entries |
 | `GET /api/usage/me` | Current user's token usage |
 | `POST /api/training/jobs` | Submit fine-tuning job |
+| `GET /dashboard/` | Web dashboard (session-authenticated) |
 
 See [docs/api-reference.md](docs/api-reference.md) for the complete API reference with request/response examples.
 

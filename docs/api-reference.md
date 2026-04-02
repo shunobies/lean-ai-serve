@@ -1865,3 +1865,57 @@ Returns `409` if the adapter is currently deployed.
 curl -X DELETE http://localhost:8420/api/training/adapters/cs-mistral-v1 \
   -H "Authorization: Bearer $TOKEN"
 ```
+
+---
+
+## Web Dashboard
+
+The built-in web dashboard is a server-rendered UI using HTMX, Jinja2, and Pico CSS. It is enabled by default and available at `/dashboard/`. All dashboard routes use cookie-based session authentication (JWT stored in an HTTP-only cookie) rather than Bearer tokens.
+
+### Dashboard Pages
+
+| Route | Description | Auth Required |
+|-------|-------------|---------------|
+| `GET /dashboard/login` | Login page (API key, LDAP, or OIDC) | No |
+| `POST /dashboard/login` | Submit login credentials | No |
+| `POST /dashboard/logout` | Clear session cookie and redirect to login | Yes |
+| `GET /dashboard/` | Home — health, KPIs, model overview, alerts | Yes |
+| `GET /dashboard/models` | Model management — load, unload, sleep, wake | Yes |
+| `GET /dashboard/monitoring` | Metrics charts and active alerts | Yes |
+| `GET /dashboard/security` | API key management and audit logs | Yes |
+| `GET /dashboard/training` | Training jobs, datasets, adapters (if enabled) | Yes |
+| `GET /dashboard/settings` | Read-only server configuration (secrets masked) | Yes |
+
+### Dashboard HTMX API
+
+These endpoints return HTML fragments for HTMX partial page updates. They are used internally by the dashboard and are not intended for external API consumption.
+
+| Route | Method | CSRF | Description |
+|-------|--------|------|-------------|
+| `/dashboard/api/partials/model-list` | GET | No | Model list HTML fragment |
+| `/dashboard/api/models/{name}/load` | POST | Yes | Load model, return updated card |
+| `/dashboard/api/models/{name}/unload` | POST | Yes | Unload model, return updated card |
+| `/dashboard/api/models/{name}/sleep` | POST | Yes | Sleep model, return updated card |
+| `/dashboard/api/models/{name}/wake` | POST | Yes | Wake model, return updated card |
+| `/dashboard/api/partials/metrics` | GET | No | Metrics summary HTML fragment |
+| `/dashboard/api/partials/alerts` | GET | No | Active alerts HTML fragment |
+| `/dashboard/api/partials/audit` | GET | No | Audit log table HTML fragment |
+| `/dashboard/api/keys/create` | POST | Yes | Create API key, return keys table |
+| `/dashboard/api/keys/{key_id}` | DELETE | Yes | Revoke API key, return keys table |
+| `/dashboard/api/training/jobs/submit` | POST | Yes | Submit training job |
+| `/dashboard/api/training/jobs/{id}/cancel` | POST | Yes | Cancel training job |
+
+**CSRF protection:** State-changing requests (POST, DELETE) require an `X-CSRF-Token` header. The token is derived from the session JWT's `jti` claim via HMAC and is automatically included by HTMX through `hx-headers` on the page body.
+
+### Static Assets
+
+Static files are served from `/static/` and include vendored JavaScript/CSS libraries (no CDN dependency, works air-gapped):
+
+| Path | Description |
+|------|-------------|
+| `/static/css/pico.min.css` | Pico CSS 2.x — semantic classless CSS framework |
+| `/static/css/dashboard.css` | Custom dashboard styles, dark mode, responsive layout |
+| `/static/js/htmx.min.js` | HTMX 2.x — server-driven interactivity |
+| `/static/js/alpine.min.js` | Alpine.js 3.x — client-side state (modals, tabs, toggles) |
+| `/static/js/chart.min.js` | Chart.js 4.x — metrics visualization |
+| `/static/js/dashboard.js` | Dashboard initialization, chart setup, toast notifications |
