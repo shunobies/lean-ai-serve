@@ -543,6 +543,31 @@ training:
 
 ---
 
+### `ingestion`
+
+Scheduled pull of DPO training data from registered [lean-ai](https://github.com/shunobies/lean-ai) workspaces. Requires `training.enabled: true`. See the [Training Guide](training-guide.md#lean-ai-workspace-ingestion) for the end-to-end flow and the [API Reference](api-reference.md#workspaces-lean-ai-dpo-ingestion) for endpoint details.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Enable the ingestion subsystem. When `false`, the `/api/training/workspaces/*` endpoints return `503` and no background polling runs. |
+| `poll_interval_seconds` | int | `600` | Seconds between automatic poll cycles (every registered, enabled workspace is polled per cycle). |
+| `max_concurrent_pulls` | int | `4` | Maximum number of workspaces polled in parallel per cycle. |
+| `page_limit` | int | `500` | Rows per `/api/export/traces` page when pulling from a remote lean-ai workspace. |
+| `http_timeout_seconds` | float | `30` | Per-request timeout when calling the remote lean-ai export API. |
+
+```yaml
+ingestion:
+  enabled: true
+  poll_interval_seconds: 300     # Poll every 5 minutes
+  max_concurrent_pulls: 8        # Up to 8 workspaces in parallel
+  page_limit: 1000
+  http_timeout_seconds: 60
+```
+
+Export keys supplied at workspace registration are encrypted at rest when `encryption.at_rest.enabled: true` (reusing the same AES-256-GCM master key as the audit log).
+
+---
+
 ### `metrics`
 
 Prometheus-compatible metrics endpoint.

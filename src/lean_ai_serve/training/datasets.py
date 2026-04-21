@@ -36,6 +36,8 @@ class DatasetManager:
         content: bytes,
         uploaded_by: str,
         description: str = "",
+        *,
+        source: str = "manual_upload",
     ) -> DatasetInfo:
         """Upload and validate a dataset.
 
@@ -93,7 +95,7 @@ class DatasetManager:
                 len(content),
                 uploaded_by,
                 now,
-                json.dumps({"description": description}),
+                json.dumps({"description": description, "source": source}),
             ),
         )
         await self._db.commit()
@@ -103,6 +105,112 @@ class DatasetManager:
             name, fmt.value, row_count or 0, len(content),
         )
         return info
+
+    async def create_empty_jsonl(
+        self,
+        name: str,
+        fmt: DatasetFormat,
+        uploaded_by: str,
+        *,
+        source: str,
+        description: str = "",
+    ) -> DatasetInfo:
+        """Create an empty JSONL-backed dataset for later appends.
+
+        Used by the lean_ai ingestor to pre-allocate a dataset that rows will
+        be appended to incrementally. Raises ValueError on duplicate name.
+        """
+        if fmt not in (DatasetFormat.JSONL, DatasetFormat.DPO):
+            raise ValueError(f"create_empty_jsonl requires JSONL or DPO format, got {fmt}")
+
+        existing = await self._db.fetchone(
+            "SELECT name FROM datasets WHERE name = ?", (name,)
+        )
+        if existing:
+            raise ValueError(f"Dataset '{name}' already exists")
+
+        ext = self._format_extension(fmt)
+        dataset_dir = self._dataset_dir / name
+        dataset_dir.mkdir(parents=True, exist_ok=True)
+        data_path = dataset_dir / f"data.{ext}"
+        data_path.touch()
+
+        now = datetime.now(UTC).isoformat()
+        await self._db.execute(
+            """
+            INSERT INTO datasets (name, path, format, row_count, size_bytes,
+                                  uploaded_by, created_at, metadata_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                name,
+                str(data_path),
+                fmt.value,
+                0,
+                0,
+                uploaded_by,
+                now,
+                json.dumps({"description": description, "source": source}),
+            ),
+        )
+        await self._db.commit()
+
+        return DatasetInfo(
+            name=name,
+            path=str(data_path),
+            format=fmt,
+            row_count=0,
+            size_bytes=0,
+            uploaded_by=uploaded_by,
+            created_at=datetime.now(UTC),
+            description=description,
+        )
+
+    async def append_jsonl(self, name: str, rows: list[dict]) -> int:
+        """Append rows to an existing JSONL/DPO-formatted dataset.
+
+        Returns the number of rows appended. Updates ``row_count`` and
+        ``size_bytes`` atomically. Raises ValueError if the dataset is not
+        JSONL/DPO or does not exist.
+        """
+        if not rows:
+            return 0
+
+        row = await self._db.fetchone(
+            "SELECT path, format, row_count, size_bytes "
+            "FROM datasets WHERE name = ?",
+            (name,),
+        )
+        if row is None:
+            raise ValueError(f"Dataset not found: {name}")
+
+        fmt = DatasetFormat(row["format"])
+        if fmt not in (DatasetFormat.JSONL, DatasetFormat.DPO):
+            raise ValueError(
+                f"append_jsonl requires JSONL or DPO format, got {fmt}"
+            )
+
+        data_path = Path(row["path"])
+        payload = "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rows)
+        payload_bytes = payload.encode("utf-8")
+
+        new_size = (row["size_bytes"] or 0) + len(payload_bytes)
+        if new_size > self._max_size:
+            raise ValueError(
+                f"Append would exceed max size "
+                f"({new_size} > {self._max_size} bytes)"
+            )
+
+        with data_path.open("ab") as f:
+            f.write(payload_bytes)
+
+        new_count = (row["row_count"] or 0) + len(rows)
+        await self._db.execute(
+            "UPDATE datasets SET row_count = ?, size_bytes = ? WHERE name = ?",
+            (new_count, new_size, name),
+        )
+        await self._db.commit()
+        return len(rows)
 
     async def list_datasets(self) -> list[DatasetInfo]:
         """List all datasets."""
@@ -184,6 +292,8 @@ class DatasetManager:
             return self._validate_jsonl(text)
         elif fmt == DatasetFormat.CSV:
             return self._validate_csv(text)
+        elif fmt == DatasetFormat.DPO:
+            return self._validate_dpo(text)
         else:
             raise DatasetValidationError(f"Unknown format: {fmt}")
 
@@ -260,6 +370,32 @@ class DatasetManager:
 
         return len(lines)
 
+    def _validate_dpo(self, text: str) -> int:
+        """Validate DPO JSONL — each line must have prompt + chosen + rejected."""
+        lines = [ln for ln in text.strip().split("\n") if ln.strip()]
+        if not lines:
+            # Empty DPO file is valid (ingestor starts empty).
+            return 0
+
+        required = {"prompt", "chosen", "rejected"}
+        for i, line in enumerate(lines):
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError as e:
+                raise DatasetValidationError(
+                    f"DPO line {i + 1} invalid JSON: {e}"
+                ) from e
+            if not isinstance(obj, dict):
+                raise DatasetValidationError(
+                    f"DPO line {i + 1} must be a JSON object"
+                )
+            missing = required - obj.keys()
+            if missing:
+                raise DatasetValidationError(
+                    f"DPO line {i + 1} missing required keys: {sorted(missing)}"
+                )
+        return len(lines)
+
     def _validate_csv(self, text: str) -> int:
         """Validate CSV format — must have a header row."""
         reader = csv.reader(io.StringIO(text))
@@ -289,7 +425,7 @@ class DatasetManager:
             data = json.loads(text)
             return data[:limit]
 
-        elif fmt == DatasetFormat.JSONL:
+        elif fmt in (DatasetFormat.JSONL, DatasetFormat.DPO):
             lines = [ln for ln in text.strip().split("\n") if ln.strip()]
             return [json.loads(ln) for ln in lines[:limit]]
 
@@ -312,6 +448,7 @@ class DatasetManager:
             DatasetFormat.ALPACA: "json",
             DatasetFormat.JSONL: "jsonl",
             DatasetFormat.CSV: "csv",
+            DatasetFormat.DPO: "jsonl",
         }[fmt]
 
     @staticmethod

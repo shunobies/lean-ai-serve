@@ -146,6 +146,40 @@ revoked_tokens_table = sa.Table(
     sa.Column("expires_at", sa.String(64), nullable=False),
 )
 
+# lean_ai workspace registry — tracks remote lean_ai instances that this server
+# polls for DPO/SFT training data.  Export keys are encrypted at rest when
+# encryption.at_rest is enabled; stored as plaintext otherwise.
+lean_ai_workspaces_table = sa.Table(
+    "lean_ai_workspaces",
+    metadata,
+    sa.Column("workspace_id", sa.String(64), primary_key=True),
+    sa.Column("display_name", sa.String(255), nullable=False),
+    sa.Column("backend_url", sa.String(512), nullable=False),
+    sa.Column("export_key_encrypted", sa.Text, nullable=False),
+    sa.Column("registered_by", sa.String(255), nullable=False),
+    sa.Column("registered_at", sa.String(64), nullable=False),
+    sa.Column("enabled", sa.Integer, nullable=False, server_default="1"),
+    sa.Column("last_polled_at", sa.String(64)),
+    sa.Column("last_error", sa.Text),
+)
+
+# Incremental ingestion state — one row per (workspace_id, format, pair_kind).
+# ``last_cursor`` is the highest source ``id`` pulled from lean_ai so far.
+lean_ai_ingest_state_table = sa.Table(
+    "lean_ai_ingest_state",
+    metadata,
+    sa.Column("workspace_id", sa.String(64), nullable=False),
+    sa.Column("format", sa.String(16), nullable=False),
+    sa.Column("pair_kind", sa.String(32), nullable=False),
+    sa.Column("last_cursor", sa.Integer, nullable=False, server_default="0"),
+    sa.Column("rows_imported", sa.Integer, nullable=False, server_default="0"),
+    sa.Column("dataset_name", sa.String(255), nullable=False),
+    sa.Column("updated_at", sa.String(64), nullable=False),
+    sa.PrimaryKeyConstraint(
+        "workspace_id", "format", "pair_kind", name="pk_lean_ai_ingest_state"
+    ),
+)
+
 # Indexes for common queries
 sa.Index("idx_audit_timestamp", audit_log_table.c.timestamp)
 sa.Index("idx_audit_user", audit_log_table.c.user_id)
@@ -153,6 +187,7 @@ sa.Index("idx_audit_action", audit_log_table.c.action)
 sa.Index("idx_usage_hour", usage_table.c.hour)
 sa.Index("idx_training_state", training_jobs_table.c.state)
 sa.Index("idx_revoked_expires", revoked_tokens_table.c.expires_at)
+sa.Index("idx_ingest_workspace", lean_ai_ingest_state_table.c.workspace_id)
 
 
 # ---------------------------------------------------------------------------

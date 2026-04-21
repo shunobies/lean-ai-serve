@@ -313,6 +313,183 @@ curl http://localhost:8420/v1/chat/completions \
   }'
 ```
 
+## lean-ai Workspace Ingestion
+
+lean-ai-serve can act as a **self-improvement coordinator** for [lean-ai](https://github.com/shunobies/lean-ai), the companion agentic coding assistant. When ingestion is enabled, the server polls registered lean-ai workspaces on a schedule, pulls any new DPO (Direct Preference Optimization) pairs they have produced, and lands them as ready-to-train datasets. Those datasets feed directly into the standard [training job flow](#submitting-a-training-job) above — so the adapter you train and deploy is driven by real user feedback from everyday coding sessions.
+
+### Why use them together
+
+Each lean-ai session captures two high-signal kinds of preference data locally — no data leaves the developer's machine unless they explicitly opt in:
+
+| Pair kind | Produced when… | DPO interpretation |
+|-----------|-----------------|--------------------|
+| `plan_rejection` | A user rejects or revises a proposed plan, then approves a later revision | `rejected` = the original plan, `chosen` = the revised plan |
+| `validation_fix` | A fix attempt's tests/lints still fail, then a later attempt succeeds | `rejected` = the broken fix, `chosen` = the fix that passed |
+
+Training a LoRA adapter on this data makes the planner propose better plans on the first try and the fixer converge faster. Because lean-ai already [anonymizes its exports](https://github.com/shunobies/lean-ai/blob/main/docs/training.md) (hashed session ids, `/workspace-<id>` path rewriting, salted `workspace_id`), one lean-ai-serve coordinator can safely pool data across many workspaces and train a single shared adapter — then every connected lean-ai workspace can point its `serve_expert_model` at that adapter and benefit from the pooled learning.
+
+```mermaid
+flowchart LR
+    A1["lean-ai workspace 1"] -->|GET /api/export/traces| S["lean-ai-serve<br/>(coordinator)"]
+    A2["lean-ai workspace 2"] -->|GET /api/export/traces| S
+    A3["lean-ai workspace 3"] -->|GET /api/export/traces| S
+    S --> D["DPO datasets<br/>(per workspace, per pair_kind)"]
+    D --> T["Training job<br/>(LLaMA-Factory DPO)"]
+    T --> L["LoRA adapter"]
+    L --> V["vLLM /load_lora_adapter"]
+    V -.->|serve_expert_model| A1
+    V -.->|serve_expert_model| A2
+    V -.->|serve_expert_model| A3
+```
+
+### Concepts
+
+Each registered workspace produces **two** datasets on lean-ai-serve:
+
+| Dataset name | Contents |
+|--------------|----------|
+| `lean_ai:<workspace_id>:dpo:plan_rejection` | DPO pairs for the planning phase |
+| `lean_ai:<workspace_id>:dpo:validation_fix` | DPO pairs for the fix loop |
+
+Both use the new `dpo` format (JSONL with `prompt` / `chosen` / `rejected` / `pair_id` / `pair_kind` per line), which LLaMA-Factory consumes natively. Rows accumulate append-only — the server tracks a `last_cursor` per `(workspace_id, pair_kind)` and dedupes by `pair_id` so re-polling is always idempotent.
+
+### Prerequisites
+
+1. **Enable ingestion** in `config.yaml` (`training.enabled` must already be true):
+
+```yaml
+training:
+  enabled: true
+
+ingestion:
+  enabled: true
+  poll_interval_seconds: 600        # 10 minutes
+  max_concurrent_pulls: 4
+  page_limit: 500
+  http_timeout_seconds: 30
+```
+
+2. **On each lean-ai workspace**, enable the export API (disabled by default — nothing leaves the machine without this):
+
+```bash
+export LEAN_AI_EXPORT_API_KEY="las-export-$(openssl rand -hex 24)"
+
+# Optional — gives stable, deterministic workspace_ids across restarts:
+export LEAN_AI_EXPORT_WORKSPACE_SALT="shared-secret"
+```
+
+3. **Fetch the workspace id** that the lean-ai instance will identify itself as:
+
+```bash
+curl -H "Authorization: Bearer $LEAN_AI_EXPORT_API_KEY" \
+  -X POST http://workstation.local:8422/api/export/workspace-id
+# -> {"workspace_id": "a1b2c3d4e5f6"}
+```
+
+### Register a workspace
+
+```bash
+curl -X POST http://localhost:8420/api/training/workspaces \
+  -H "Authorization: Bearer las-..." \
+  -H "Content-Type: application/json" \
+  -d '{
+    "workspace_id": "a1b2c3d4e5f6",
+    "display_name": "alice-workstation",
+    "backend_url": "http://workstation.local:8422",
+    "export_key": "las-export-..."
+  }'
+```
+
+The server probes `GET /api/export/manifest` with the supplied key before saving, so a bad key or unreachable URL fails fast with `400` at registration time. On success, two empty DPO datasets are created and one `lean_ai_ingest_state` row per `pair_kind` is seeded with `last_cursor=0`.
+
+Export keys are encrypted at rest via AES-256-GCM when `encryption.at_rest` is enabled (same master key used for the audit log).
+
+### Polling
+
+Once registered, the background scheduler pulls new rows from every enabled workspace every `poll_interval_seconds` (default 600). For each workspace × pair_kind:
+
+1. Read `last_cursor` from `lean_ai_ingest_state`.
+2. `GET /api/export/traces?format=dpo&cursor=<last_cursor>&limit=<page_limit>` with the workspace's Bearer key.
+3. Filter rows by `pair_kind`, drop any whose `pair_id` already exists in the dataset file.
+4. Append new rows to the dataset's JSONL file and advance `last_cursor` atomically.
+5. Repeat until the page is short (no more rows upstream).
+
+Manual kick-off for a single workspace (e.g. right after registration):
+
+```bash
+curl -X POST http://localhost:8420/api/training/workspaces/a1b2c3d4e5f6/poll \
+  -H "Authorization: Bearer las-..."
+```
+
+### Training on ingested data
+
+Ingested datasets appear in `GET /api/training/datasets` alongside any manually uploaded data. Submit a training job the same way you would for any other dataset:
+
+```bash
+curl -X POST http://localhost:8420/api/training/jobs \
+  -H "Authorization: Bearer las-..." \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "lean-ai-planner-v1",
+    "base_model": "qwen-coder-30b",
+    "dataset": "lean_ai:a1b2c3d4e5f6:dpo:plan_rejection",
+    "num_epochs": 1,
+    "learning_rate": 1e-5,
+    "lora_rank": 16,
+    "lora_alpha": 32
+  }'
+```
+
+For DPO training, LLaMA-Factory expects a dataset_info entry with `"ranking": true` and columns mapped to `prompt`/`chosen`/`rejected`. The `dpo` format written by the ingestor uses exactly those top-level keys.
+
+### Closing the loop — point lean-ai back at the trained adapter
+
+After the training job completes and the adapter is deployed to a running vLLM model:
+
+```bash
+curl -X POST http://localhost:8420/api/training/adapters/lean-ai-planner-v1/deploy \
+  -H "Authorization: Bearer las-..." \
+  -H "Content-Type: application/json" \
+  -d '{"model_name": "qwen-coder-30b"}'
+```
+
+Then in each lean-ai workspace's `config.yaml`:
+
+```yaml
+expert_llm_provider: serve
+serve_url: "http://lean-ai-serve.internal:8420"
+serve_api_key: "las-your-api-key"
+serve_model: "qwen-coder-30b"
+serve_expert_model: "lean-ai-planner-v1"   # the LoRA we just trained
+```
+
+Now the expert phases (planning, validation) route through the fine-tuned adapter. As new DPO pairs accumulate, periodic re-training produces successor adapters (`v2`, `v3`, …) and each workspace just updates `serve_expert_model` to adopt them — no code changes, no agent restart.
+
+### Managing registered workspaces
+
+```bash
+# List workspaces with per-pair-kind cursors + row counts
+curl -H "Authorization: Bearer las-..." \
+  http://localhost:8420/api/training/workspaces
+
+# Soft-disable (keeps datasets + cursors; re-enable with re-register)
+curl -X DELETE http://localhost:8420/api/training/workspaces/a1b2c3d4e5f6 \
+  -H "Authorization: Bearer las-..."
+
+# Hard-delete (also removes DPO datasets from disk)
+curl -X DELETE "http://localhost:8420/api/training/workspaces/a1b2c3d4e5f6?hard=true" \
+  -H "Authorization: Bearer las-..."
+```
+
+### Security properties
+
+- **Fail-closed on both ends.** lean-ai's export API is disabled unless `LEAN_AI_EXPORT_API_KEY` is set; lean-ai-serve's ingestion endpoints return `503` unless `ingestion.enabled: true`.
+- **Already anonymized.** Rows emitted by lean-ai have session ids hashed and repo paths rewritten. lean-ai-serve does not need to re-scrub.
+- **Scoped permission.** All workspace endpoints require `workspace:manage` (granted to `admin` and `trainer`). Regular `user` API keys cannot register or poll workspaces.
+- **Encrypted export keys.** When `encryption.at_rest` is enabled, stored export keys are AES-256-GCM encrypted with the same master key the audit log uses.
+- **Cursor-atomic append.** The ingestor writes a page of rows and advances `last_cursor` in one transaction, so a crash mid-poll just replays the last page on next cycle — it never drops or double-counts data.
+- **pair_id dedup.** Even without the cursor, duplicate `pair_id`s are skipped at write time, so re-registering an existing workspace or re-polling a page is always safe.
+
 ## CLI Commands
 
 ```bash

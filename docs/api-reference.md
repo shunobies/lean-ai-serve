@@ -15,6 +15,8 @@ lean-ai-serve exposes a fully **OpenAI-compatible API**, so any OpenAI SDK or cl
 
 [**lean-ai**](https://github.com/shunobies/lean-ai) is the companion agentic coding assistant that integrates natively with lean-ai-serve. Instead of writing custom HTTP handlers, lean-ai provides a full-featured AI development environment with a VS Code extension, multi-turn planning workflows, codebase indexing, and tool-augmented code generation — all backed by models served from lean-ai-serve.
 
+The integration is **bidirectional**: lean-ai workspaces call lean-ai-serve for inference, and lean-ai-serve can pull DPO preference pairs (plan revisions, validation fix loops) back from those workspaces on a schedule to continuously fine-tune the model that serves them. See the [Training Guide](training-guide.md#lean-ai-workspace-ingestion) for the self-improvement loop.
+
 **Setup:**
 
 ```bash
@@ -1923,6 +1925,222 @@ Returns `409` if the adapter is currently deployed.
 
 ```bash
 curl -X DELETE http://localhost:8420/api/training/adapters/cs-mistral-v1 \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+---
+
+### Workspaces (lean-ai DPO ingestion)
+
+lean-ai-serve can act as a coordinator for [lean-ai](https://github.com/shunobies/lean-ai) workspaces: it polls each registered workspace's `/api/export/traces` endpoint on a schedule and lands incoming DPO pairs (plan rejections and validation fixes) as ready-to-train datasets. See the [Training Guide](training-guide.md#lean-ai-workspace-ingestion) for the end-to-end flow and motivation.
+
+All workspace endpoints require:
+
+- `ingestion.enabled: true` in the server config (otherwise these endpoints return `503`).
+- Permission `workspace:manage` (granted to `admin` and `trainer` by default).
+- An export key issued by the remote lean-ai instance (its `LEAN_AI_EXPORT_API_KEY`).
+
+#### POST /api/training/workspaces
+
+Register a lean-ai workspace. The server probes the remote `/api/export/manifest` with the supplied key before saving, and creates two empty DPO datasets — one for each `pair_kind` — that subsequent polls will append to.
+
+**Permission:** `workspace:manage`
+
+**Request body:**
+
+```json
+{
+  "workspace_id": "a1b2c3d4e5f6",
+  "display_name": "alice-workstation",
+  "backend_url": "http://workstation.local:8422",
+  "export_key": "las-export-..."
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| workspace_id | string | yes | The stable id returned by `POST /api/export/workspace-id` on the remote lean-ai |
+| display_name | string | yes | Human-friendly label shown in the dashboard |
+| backend_url | string | yes | Base URL of the remote lean-ai backend (e.g. `http://host:8422`) |
+| export_key | string | yes | Bearer token from the remote lean-ai's `LEAN_AI_EXPORT_API_KEY`. Encrypted at rest when `encryption.at_rest` is enabled |
+
+**Response (201):**
+
+```json
+{
+  "workspace_id": "a1b2c3d4e5f6",
+  "display_name": "alice-workstation",
+  "backend_url": "http://workstation.local:8422",
+  "registered_by": "alice",
+  "registered_at": "2026-04-21T14:00:00Z",
+  "enabled": true,
+  "last_polled_at": null,
+  "last_error": null,
+  "ingest": [
+    {
+      "format": "dpo",
+      "pair_kind": "plan_rejection",
+      "last_cursor": 0,
+      "rows_imported": 0,
+      "dataset_name": "lean_ai:a1b2c3d4e5f6:dpo:plan_rejection",
+      "updated_at": "2026-04-21T14:00:00Z"
+    },
+    {
+      "format": "dpo",
+      "pair_kind": "validation_fix",
+      "last_cursor": 0,
+      "rows_imported": 0,
+      "dataset_name": "lean_ai:a1b2c3d4e5f6:dpo:validation_fix",
+      "updated_at": "2026-04-21T14:00:00Z"
+    }
+  ]
+}
+```
+
+Re-registering an existing `workspace_id` rotates the export key and display name but leaves cursors untouched, so resuming a rotated workspace does not re-ingest already-landed rows.
+
+Returns `400` if the manifest probe fails (bad key, unreachable URL, etc.) and `503` if ingestion is not enabled.
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:8420/api/training/workspaces \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "workspace_id": "a1b2c3d4e5f6",
+    "display_name": "alice-workstation",
+    "backend_url": "http://workstation.local:8422",
+    "export_key": "las-export-..."
+  }'
+```
+
+---
+
+#### GET /api/training/workspaces
+
+List all registered workspaces with their current ingestion state.
+
+**Permission:** `workspace:manage`
+
+**Response:**
+
+```json
+[
+  {
+    "workspace_id": "a1b2c3d4e5f6",
+    "display_name": "alice-workstation",
+    "backend_url": "http://workstation.local:8422",
+    "registered_by": "alice",
+    "registered_at": "2026-04-21T14:00:00Z",
+    "enabled": true,
+    "last_polled_at": "2026-04-21T14:10:00Z",
+    "last_error": null,
+    "ingest": [
+      {
+        "format": "dpo",
+        "pair_kind": "plan_rejection",
+        "last_cursor": 142,
+        "rows_imported": 18,
+        "dataset_name": "lean_ai:a1b2c3d4e5f6:dpo:plan_rejection",
+        "updated_at": "2026-04-21T14:10:00Z"
+      },
+      {
+        "format": "dpo",
+        "pair_kind": "validation_fix",
+        "last_cursor": 142,
+        "rows_imported": 7,
+        "dataset_name": "lean_ai:a1b2c3d4e5f6:dpo:validation_fix",
+        "updated_at": "2026-04-21T14:10:00Z"
+      }
+    ]
+  }
+]
+```
+
+The export key is never echoed back.
+
+**Example:**
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8420/api/training/workspaces
+```
+
+---
+
+#### POST /api/training/workspaces/{workspace_id}/poll
+
+Trigger an immediate pull from a single workspace. Useful for testing a registration without waiting for the next scheduled cycle, or for forcing a refresh after rotating an export key.
+
+**Permission:** `workspace:manage`
+
+**Path parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| workspace_id | string | The workspace id supplied at registration |
+
+**Response:**
+
+```json
+{
+  "workspace_id": "a1b2c3d4e5f6",
+  "rows_pulled": 3,
+  "datasets_updated": [
+    "lean_ai:a1b2c3d4e5f6:dpo:plan_rejection",
+    "lean_ai:a1b2c3d4e5f6:dpo:validation_fix"
+  ],
+  "errors": []
+}
+```
+
+On remote failure (bad key, unreachable URL) the response still returns `200` with `errors` populated and `rows_pulled: 0`; the workspace's `last_error` field is updated so it's visible in the list view. The scheduler retries on the next cycle automatically.
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:8420/api/training/workspaces/a1b2c3d4e5f6/poll \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+---
+
+#### DELETE /api/training/workspaces/{workspace_id}
+
+Soft-disable a workspace (default) or hard-delete it and its datasets.
+
+**Permission:** `workspace:manage`
+
+**Path parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| workspace_id | string | The workspace id to remove |
+
+**Query parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| hard | boolean | `false` | If `false`, sets `enabled=0` but keeps datasets + cursors so the workspace can be re-enabled without re-ingesting. If `true`, removes the workspace row, its cursors, and the underlying DPO datasets from disk |
+
+**Response:**
+
+```json
+{ "status": "disabled" }
+```
+
+Or `{ "status": "deleted" }` when `hard=true`.
+
+**Example:**
+
+```bash
+# Soft-disable
+curl -X DELETE http://localhost:8420/api/training/workspaces/a1b2c3d4e5f6 \
+  -H "Authorization: Bearer $TOKEN"
+
+# Hard-delete (also removes datasets)
+curl -X DELETE "http://localhost:8420/api/training/workspaces/a1b2c3d4e5f6?hard=true" \
   -H "Authorization: Bearer $TOKEN"
 ```
 

@@ -28,6 +28,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "dataset:upload",
         "dataset:read",
         "adapter:read",
+        "workspace:manage",
         "metrics:read",
         "audit:read_own",
     },

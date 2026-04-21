@@ -19,6 +19,7 @@ from lean_ai_serve.models.schemas import AuthUser
 from lean_ai_serve.security.auth import require_permission
 from lean_ai_serve.training.adapters import AdapterError, AdapterRegistry
 from lean_ai_serve.training.datasets import DatasetManager, DatasetValidationError
+from lean_ai_serve.training.lean_ai_ingest import IngestError, LeanAiIngestor
 from lean_ai_serve.training.orchestrator import TrainingOrchestrator
 from lean_ai_serve.training.schemas import (
     AdapterDeployRequest,
@@ -27,9 +28,12 @@ from lean_ai_serve.training.schemas import (
     AdapterState,
     DatasetFormat,
     DatasetInfo,
+    IngestResult,
     TrainingJobInfo,
     TrainingJobState,
     TrainingSubmitRequest,
+    WorkspaceInfo,
+    WorkspaceRegisterRequest,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,6 +56,16 @@ def _get_orchestrator(request: Request) -> TrainingOrchestrator:
 
 def _get_adapters(request: Request) -> AdapterRegistry:
     return request.app.state.adapter_registry
+
+
+def _get_ingestor(request: Request) -> LeanAiIngestor:
+    ingestor = getattr(request.app.state, "lean_ai_ingestor", None)
+    if ingestor is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Ingestion not enabled — set ingestion.enabled=true in config",
+        )
+    return ingestor
 
 
 # ===========================================================================
@@ -372,3 +386,72 @@ async def delete_adapter(
         return {"status": "deleted"}
     except AdapterError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
+
+
+# ===========================================================================
+# LEAN_AI WORKSPACES (DPO data ingestion)
+# ===========================================================================
+
+
+@router.post("/workspaces", response_model=WorkspaceInfo, status_code=201)
+async def register_workspace(
+    body: WorkspaceRegisterRequest,
+    request: Request,
+    user: AuthUser = Depends(require_permission("workspace:manage")),
+):
+    """Register a lean_ai workspace for scheduled DPO pulls.
+
+    Probes the remote ``/api/export/manifest`` with the supplied key before
+    saving. Creates two DPO datasets (one per pair_kind) on success.
+    """
+    ingestor = _get_ingestor(request)
+    try:
+        return await ingestor.register_workspace(
+            workspace_id=body.workspace_id,
+            display_name=body.display_name,
+            backend_url=body.backend_url,
+            export_key=body.export_key,
+            registered_by=user.user_id,
+        )
+    except IngestError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.get("/workspaces", response_model=list[WorkspaceInfo])
+async def list_workspaces(
+    request: Request,
+    user: AuthUser = Depends(require_permission("workspace:manage")),
+):
+    """List registered lean_ai workspaces with per-pair-kind ingest state."""
+    return await _get_ingestor(request).list_workspaces()
+
+
+@router.post("/workspaces/{workspace_id}/poll", response_model=IngestResult)
+async def poll_workspace(
+    workspace_id: str,
+    request: Request,
+    user: AuthUser = Depends(require_permission("workspace:manage")),
+):
+    """Manually pull any new DPO rows from a single workspace."""
+    ingestor = _get_ingestor(request)
+    try:
+        return await ingestor.poll_workspace(workspace_id)
+    except IngestError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+
+@router.delete("/workspaces/{workspace_id}")
+async def delete_workspace(
+    workspace_id: str,
+    request: Request,
+    hard: bool = False,
+    user: AuthUser = Depends(require_permission("workspace:manage")),
+):
+    """Soft-disable a workspace (default) or hard-delete it + its datasets."""
+    ingestor = _get_ingestor(request)
+    deleted = await ingestor.delete_workspace(workspace_id, hard=hard)
+    if not deleted:
+        raise HTTPException(
+            status_code=404, detail=f"Workspace not found: {workspace_id}"
+        )
+    return {"status": "deleted" if hard else "disabled"}

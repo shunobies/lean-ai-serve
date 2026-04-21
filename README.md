@@ -21,6 +21,7 @@ lean-ai-serve wraps [vLLM](https://github.com/vllm-project/vllm) with enterprise
 | **Encryption** | AES-256 encryption at rest, master key from file/env/HashiCorp Vault, config secret patterns (`ENV[]`, `ENC[]`) |
 | **Content Safety** | PHI/PII pattern detection with warn/redact/block actions |
 | **Fine-Tuning** | LoRA training via LLaMA-Factory, dataset management, adapter deployment to running models |
+| **Self-Improvement** | Pull DPO preference pairs from [lean-ai](https://github.com/shunobies/lean-ai) workspaces on a schedule, train adapters on real user feedback, deploy back to the same workspaces |
 | **Observability** | Prometheus metrics (zero-dependency), structured logging (JSON/console), OpenTelemetry tracing, alerting |
 | **Web Dashboard** | Built-in server-rendered UI (HTMX + Jinja2 + Pico CSS) — model management, monitoring, security, training, settings. No Node.js required |
 | **Context Compression** | LLMlingua2 prompt compression for long contexts |
@@ -157,6 +158,7 @@ See [docs/cli-reference.md](docs/cli-reference.md) for full usage details.
 | `GET /api/audit/logs` | Query audit entries |
 | `GET /api/usage/me` | Current user's token usage |
 | `POST /api/training/jobs` | Submit fine-tuning job |
+| `POST /api/training/workspaces` | Register a lean-ai workspace for scheduled DPO data pulls |
 | `GET /dashboard/` | Web dashboard (session-authenticated) |
 
 See [docs/api-reference.md](docs/api-reference.md) for the complete API reference with request/response examples.

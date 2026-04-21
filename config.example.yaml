@@ -154,6 +154,16 @@ training:
   dataset_directory: ""                # Default: {cache}/datasets
   max_dataset_size_mb: 1024            # Max upload size per dataset
 
+# Scheduled pull of DPO training data from registered lean_ai workspaces.
+# Workspaces are registered via POST /api/training/workspaces with an export
+# key issued by their lean_ai instance (LEAN_AI_EXPORT_API_KEY).
+ingestion:
+  enabled: false                       # Turn on to activate the poller + endpoints
+  poll_interval_seconds: 600           # 10 minutes between automatic poll cycles
+  max_concurrent_pulls: 4              # Parallel workspace polls per cycle
+  page_limit: 500                      # Rows per /api/export/traces page
+  http_timeout_seconds: 30             # Per-request timeout to remote lean_ai
+
 # --- Observability ---
 # All features are independently toggleable.
 

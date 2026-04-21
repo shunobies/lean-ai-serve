@@ -188,6 +188,16 @@ class TrainingConfig(BaseModel):
     max_dataset_size_mb: int = 1024
 
 
+class IngestionConfig(BaseModel):
+    """Scheduled pull of training data from registered lean_ai workspaces."""
+
+    enabled: bool = False
+    poll_interval_seconds: int = 600
+    max_concurrent_pulls: int = 4
+    page_limit: int = 500
+    http_timeout_seconds: float = 30.0
+
+
 class ContextCompressionConfig(BaseModel):
     enabled: bool = False
     method: str = "llmlingua2"
@@ -263,6 +273,7 @@ class Settings(BaseModel):
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig)
     models: dict[str, ModelConfig] = Field(default_factory=dict)
     training: TrainingConfig = Field(default_factory=TrainingConfig)
+    ingestion: IngestionConfig = Field(default_factory=IngestionConfig)
     context_compression: ContextCompressionConfig = Field(
         default_factory=ContextCompressionConfig
     )

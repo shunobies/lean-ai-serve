@@ -32,6 +32,7 @@ class DatasetFormat(StrEnum):
     ALPACA = "alpaca"
     JSONL = "jsonl"
     CSV = "csv"
+    DPO = "dpo"  # {prompt, chosen, rejected, pair_id, pair_kind, ...}
 
 
 # ---------------------------------------------------------------------------
@@ -136,3 +137,51 @@ class TrainingProgress(BaseModel):
     progress_pct: float = 0.0
     message: str = ""
     metrics: dict[str, Any] = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# lean_ai workspace ingestion (DPO coordinator)
+# ---------------------------------------------------------------------------
+
+
+class WorkspaceRegisterRequest(BaseModel):
+    """Register a remote lean_ai workspace for DPO data pulls."""
+
+    workspace_id: str
+    display_name: str
+    backend_url: str  # e.g. "http://workstation.local:8422"
+    export_key: str  # The Bearer token lean_ai issued for its export API
+
+
+class IngestState(BaseModel):
+    """Per-(format, pair_kind) ingestion progress for one workspace."""
+
+    format: DatasetFormat
+    pair_kind: str  # "plan_rejection" | "validation_fix"
+    last_cursor: int
+    rows_imported: int
+    dataset_name: str
+    updated_at: datetime
+
+
+class WorkspaceInfo(BaseModel):
+    """Registered workspace (export key never echoed)."""
+
+    workspace_id: str
+    display_name: str
+    backend_url: str
+    registered_by: str
+    registered_at: datetime
+    enabled: bool
+    last_polled_at: datetime | None = None
+    last_error: str | None = None
+    ingest: list[IngestState] = Field(default_factory=list)
+
+
+class IngestResult(BaseModel):
+    """Summary returned by a poll operation."""
+
+    workspace_id: str
+    rows_pulled: int
+    datasets_updated: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)

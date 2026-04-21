@@ -155,18 +155,8 @@ async def lifespan(app: FastAPI):
     # Background scheduler
     from lean_ai_serve.observability.tasks import BackgroundScheduler
 
-    scheduler = BackgroundScheduler(
-        db,
-        settings,
-        metrics=metrics,
-        rate_limiter=rate_limiter,
-        usage_tracker=usage_tracker,
-        alert_evaluator=alert_evaluator,
-    )
-    await scheduler.start()
-    app.state.background_scheduler = scheduler
-
     # Training subsystem (if enabled)
+    lean_ai_ingestor = None
     if settings.training.enabled:
         from lean_ai_serve.training.adapters import AdapterRegistry
         from lean_ai_serve.training.backend import create_backend
@@ -188,6 +178,35 @@ async def lifespan(app: FastAPI):
         app.state.training_orchestrator = orchestrator
 
         logger.info("Training subsystem enabled (backend=%s)", training_backend.name)
+
+        # lean_ai workspace ingestion (opt-in)
+        if settings.ingestion.enabled:
+            from lean_ai_serve.training.lean_ai_ingest import LeanAiIngestor
+
+            lean_ai_ingestor = LeanAiIngestor(
+                db,
+                dataset_manager,
+                settings,
+                encryption=encryption_service,
+            )
+            app.state.lean_ai_ingestor = lean_ai_ingestor
+            logger.info(
+                "lean_ai ingestion enabled (poll_interval=%ds)",
+                settings.ingestion.poll_interval_seconds,
+            )
+
+    # Background scheduler — started after training so the ingestor (if any) is wired
+    scheduler = BackgroundScheduler(
+        db,
+        settings,
+        metrics=metrics,
+        rate_limiter=rate_limiter,
+        usage_tracker=usage_tracker,
+        alert_evaluator=alert_evaluator,
+        lean_ai_ingestor=lean_ai_ingestor,
+    )
+    await scheduler.start()
+    app.state.background_scheduler = scheduler
 
     # Timing
     app.state.start_time = time.monotonic()
@@ -255,6 +274,8 @@ async def lifespan(app: FastAPI):
 
     # 5. Close HTTP clients
     await _safe_close("proxy-client", close_proxy_client())
+    if lean_ai_ingestor is not None:
+        await _safe_close("lean-ai-ingestor", lean_ai_ingestor.close())
 
     # 6. Close database last (other components may have final writes)
     await _safe_close("database", db.close())

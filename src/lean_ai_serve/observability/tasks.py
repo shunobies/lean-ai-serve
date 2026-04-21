@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from lean_ai_serve.observability.metrics import MetricsCollector
     from lean_ai_serve.security.rate_limiter import RateLimiter
     from lean_ai_serve.security.usage import UsageTracker
+    from lean_ai_serve.training.lean_ai_ingest import LeanAiIngestor
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ class BackgroundScheduler:
         rate_limiter: RateLimiter | None = None,
         usage_tracker: UsageTracker | None = None,
         alert_evaluator: AlertEvaluator | None = None,
+        lean_ai_ingestor: LeanAiIngestor | None = None,
     ) -> None:
         self._db = db
         self._settings = settings
@@ -43,6 +45,7 @@ class BackgroundScheduler:
         self._rate_limiter = rate_limiter
         self._usage_tracker = usage_tracker
         self._alert_evaluator = alert_evaluator
+        self._lean_ai_ingestor = lean_ai_ingestor
         self._tasks: list[asyncio.Task] = []
 
     async def start(self) -> None:
@@ -78,6 +81,16 @@ class BackgroundScheduler:
                 )
             ),
         ]
+        if self._lean_ai_ingestor is not None:
+            self._tasks.append(
+                asyncio.create_task(
+                    self._run_periodic(
+                        "lean_ai_ingestion",
+                        self._settings.ingestion.poll_interval_seconds,
+                        self._poll_lean_ai,
+                    )
+                )
+            )
         logger.info("Background scheduler started (%d tasks)", len(self._tasks))
 
     async def stop(self) -> None:
@@ -176,3 +189,18 @@ class BackgroundScheduler:
         """Evaluate alert rules against current metrics."""
         if self._alert_evaluator:
             self._alert_evaluator.evaluate()
+
+    async def _poll_lean_ai(self) -> None:
+        """Pull any new DPO training data from registered lean_ai workspaces."""
+        if self._lean_ai_ingestor is None:
+            return
+        results = await self._lean_ai_ingestor.poll_all()
+        total_rows = sum(r.rows_pulled for r in results)
+        total_errors = sum(len(r.errors) for r in results)
+        if total_rows or total_errors:
+            logger.info(
+                "lean_ai ingestion cycle: pulled %d rows across %d workspaces (%d errors)",
+                total_rows,
+                len(results),
+                total_errors,
+            )
