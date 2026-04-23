@@ -96,10 +96,11 @@
                 {% if can_manage %}<th>Actions</th>{% endif %}
             </tr>
         </thead>
-        <tbody id="workspaces-list-body">
-            {% for workspace in workspaces %}
-            {% include "training/_workspace_row.html" %}
-            {% endfor %}
+        <tbody id="workspaces-list-body"
+               hx-get="/dashboard/api/partials/workspace-list"
+               hx-trigger="every 30s [document.visibilityState === 'visible' && !document.querySelector('dialog[open]')]"
+               hx-swap="innerHTML">
+            {% include "training/_workspaces_tbody.html" %}
         </tbody>
     </table>
     {% else %}
@@ -107,7 +108,8 @@
     <table style="display:none">
         {# Keep the swap target available so the first register call has
            somewhere to land its new row without needing to refresh the
-           page. #}
+           page. Auto-refresh is not attached here — nothing to refresh
+           until a workspace exists. #}
         <tbody id="workspaces-list-body"></tbody>
     </table>
     {% endif %}

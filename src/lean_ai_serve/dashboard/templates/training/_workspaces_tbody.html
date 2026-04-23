@@ -1,0 +1,5 @@
+{# Just the <tr> loop — used both as an HTMX swap target for auto-refresh
+   and as the inline body of the full table in _workspaces.html. #}
+{% for workspace in workspaces %}
+{% include "training/_workspace_row.html" %}
+{% endfor %}

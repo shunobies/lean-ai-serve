@@ -440,6 +440,38 @@ def _workspace_row_response(
     )
 
 
+@router.get("/partials/workspace-list", response_class=HTMLResponse)
+async def partial_workspace_list(request: Request):
+    """Render the <tbody> fragment for auto-refresh polling."""
+    try:
+        user = await require_dashboard_user(request)
+    except _LoginRedirectError:
+        return HTMLResponse("", status_code=401)
+
+    from datetime import UTC, datetime
+
+    from lean_ai_serve.config import get_settings
+
+    ingestor = getattr(request.app.state, "lean_ai_ingestor", None)
+    if ingestor is None:
+        # Ingestion turned off after the page loaded — return empty body
+        # rather than a noisy error (the operator will notice on next
+        # manual refresh that the tab no longer renders).
+        return HTMLResponse("")
+    workspaces = await ingestor.list_workspaces()
+    settings = get_settings()
+    templates = get_templates()
+    ctx = build_template_context(
+        request, user,
+        workspaces=workspaces,
+        stale_poll_seconds=2 * settings.ingestion.poll_interval_seconds,
+        now_utc=datetime.now(UTC),
+    )
+    return templates.TemplateResponse(
+        request, "training/_workspaces_tbody.html", ctx,
+    )
+
+
 @router.post("/partials/workspaces", response_class=HTMLResponse)
 async def partial_register_workspace(request: Request):
     """Register a new workspace from the dashboard form.

@@ -175,6 +175,36 @@ def _install_ingestor(app, **methods):
 
 
 class TestWorkspacePartials:
+    def test_workspace_list_partial_requires_auth(self, client):
+        resp = client.get("/dashboard/api/partials/workspace-list")
+        assert resp.status_code == 401
+
+    def test_workspace_list_partial_empty_when_ingestion_disabled(
+        self, client, auth_headers,
+    ):
+        """When app.state has no ingestor, return an empty body (not a 500)."""
+        resp = client.get(
+            "/dashboard/api/partials/workspace-list",
+            cookies=auth_headers["cookies"],
+        )
+        assert resp.status_code == 200
+        assert resp.text.strip() == ""
+
+    def test_workspace_list_partial_renders_rows(
+        self, app, client, auth_headers,
+    ):
+        info = _make_workspace_info()
+        _install_ingestor(
+            app, list_workspaces=AsyncMock(return_value=[info]),
+        )
+        resp = client.get(
+            "/dashboard/api/partials/workspace-list",
+            cookies=auth_headers["cookies"],
+        )
+        assert resp.status_code == 200
+        assert 'id="workspace-row-ws-abc"' in resp.text
+        assert "alice-workstation" in resp.text
+
     def test_register_requires_csrf(self, client, auth_headers):
         resp = client.post(
             "/dashboard/api/partials/workspaces",
