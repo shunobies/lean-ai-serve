@@ -91,18 +91,27 @@ class LeanAiIngestor:
         workspace_id: str,
         display_name: str,
         backend_url: str,
+        repo_root: str,
         export_key: str,
         registered_by: str,
     ) -> WorkspaceInfo:
-        """Validate the export key against the remote manifest, then persist.
+        """Validate the export key + workspace identity, then persist.
 
-        On success, creates one dataset per ``pair_kind`` plus one
-        ``lean_ai_ingest_state`` row per ``pair_kind`` with ``last_cursor=0``.
-        Re-registering the same workspace_id rotates the export key and display
-        name but leaves cursors untouched.
+        Calls ``/api/export/workspace-id`` with ``repo_root`` to confirm the
+        remote salt+path pair hashes to the claimed ``workspace_id``. Falls
+        back to probing ``/api/export/manifest`` if ``/workspace-id`` is not
+        available (older producer). On success, creates one dataset per
+        ``pair_kind`` plus one ``lean_ai_ingest_state`` row per ``pair_kind``
+        with ``last_cursor=0``. Re-registering the same workspace_id rotates
+        the export key, display name, and repo_root but leaves cursors
+        untouched.
         """
         backend_url = backend_url.rstrip("/")
-        await self._probe_manifest(backend_url, export_key)
+        if not repo_root:
+            raise IngestError("repo_root is required (passed as ?repo_root= on every /api/export/*)")
+        await self._verify_workspace_id(
+            backend_url, export_key, repo_root, claimed_id=workspace_id,
+        )
 
         encrypted = self._encrypt_key(export_key)
         now = datetime.now(UTC).isoformat()
@@ -116,14 +125,15 @@ class LeanAiIngestor:
             await self._db.execute(
                 """
                 INSERT INTO lean_ai_workspaces
-                    (workspace_id, display_name, backend_url, export_key_encrypted,
-                     registered_by, registered_at, enabled)
-                VALUES (?, ?, ?, ?, ?, ?, 1)
+                    (workspace_id, display_name, backend_url, repo_root,
+                     export_key_encrypted, registered_by, registered_at, enabled)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1)
                 """,
                 (
                     workspace_id,
                     display_name,
                     backend_url,
+                    repo_root,
                     encrypted,
                     registered_by,
                     now,
@@ -133,11 +143,11 @@ class LeanAiIngestor:
             await self._db.execute(
                 """
                 UPDATE lean_ai_workspaces
-                   SET display_name = ?, backend_url = ?,
+                   SET display_name = ?, backend_url = ?, repo_root = ?,
                        export_key_encrypted = ?, enabled = 1, last_error = NULL
                  WHERE workspace_id = ?
                 """,
-                (display_name, backend_url, encrypted, workspace_id),
+                (display_name, backend_url, repo_root, encrypted, workspace_id),
             )
 
         # Ensure one dataset + state row per pair_kind exists.
@@ -241,6 +251,7 @@ class LeanAiIngestor:
             workspace_id=row["workspace_id"],
             display_name=row["display_name"],
             backend_url=row["backend_url"],
+            repo_root=row["repo_root"],
             registered_by=row["registered_by"],
             registered_at=datetime.fromisoformat(row["registered_at"]),
             enabled=bool(row["enabled"]),
@@ -308,6 +319,11 @@ class LeanAiIngestor:
             raise IngestError(f"Workspace disabled: {workspace_id}")
 
         backend_url = row["backend_url"]
+        repo_root = row["repo_root"]
+        if not repo_root:
+            raise IngestError(
+                f"Workspace {workspace_id} is missing repo_root — re-register it"
+            )
         export_key = self._decrypt_key(row["export_key_encrypted"])
         result = IngestResult(workspace_id=workspace_id, rows_pulled=0)
 
@@ -316,6 +332,7 @@ class LeanAiIngestor:
                 pulled = await self._poll_pair_kind(
                     workspace_id=workspace_id,
                     backend_url=backend_url,
+                    repo_root=repo_root,
                     export_key=export_key,
                     pair_kind=pair_kind,
                     result=result,
@@ -371,6 +388,7 @@ class LeanAiIngestor:
         *,
         workspace_id: str,
         backend_url: str,
+        repo_root: str,
         export_key: str,
         pair_kind: str,
         result: IngestResult,
@@ -394,6 +412,7 @@ class LeanAiIngestor:
         while True:
             rows = await self._fetch_page(
                 backend_url=backend_url,
+                repo_root=repo_root,
                 export_key=export_key,
                 cursor=cursor,
                 limit=page_limit,
@@ -474,15 +493,24 @@ class LeanAiIngestor:
     # Internal: HTTP
     # ------------------------------------------------------------------
 
-    async def _probe_manifest(self, backend_url: str, export_key: str) -> None:
+    async def _verify_workspace_id(
+        self,
+        backend_url: str,
+        export_key: str,
+        repo_root: str,
+        *,
+        claimed_id: str,
+    ) -> None:
+        """Confirm ``workspace_id`` matches ``hash(salt, repo_root)`` on the remote."""
         try:
             resp = await self._http.get(
-                f"{backend_url}/api/export/manifest",
+                f"{backend_url}/api/export/workspace-id",
+                params={"repo_root": repo_root},
                 headers={"Authorization": f"Bearer {export_key}"},
             )
         except httpx.HTTPError as exc:
             raise IngestError(
-                f"Cannot reach {backend_url}/api/export/manifest: {exc!r}"
+                f"Cannot reach {backend_url}/api/export/workspace-id: {exc!r}"
             ) from exc
         if resp.status_code == 401:
             raise IngestError("Export key rejected (401)")
@@ -490,20 +518,41 @@ class LeanAiIngestor:
             raise IngestError("Export key lacks permission (403)")
         if resp.status_code >= 400:
             raise IngestError(
-                f"Manifest probe failed ({resp.status_code}): {resp.text[:200]}"
+                f"workspace-id probe failed ({resp.status_code}): {resp.text[:200]}"
+            )
+        try:
+            returned = resp.json().get("workspace_id")
+        except ValueError as exc:
+            raise IngestError(
+                f"workspace-id endpoint returned non-JSON: {resp.text[:200]}"
+            ) from exc
+        if not returned:
+            raise IngestError("workspace-id response missing 'workspace_id' field")
+        if returned != claimed_id:
+            raise IngestError(
+                "workspace_id mismatch — remote computed "
+                f"'{returned}' from repo_root='{repo_root}' but the registration "
+                f"claimed '{claimed_id}'. Use the value returned by "
+                f"GET /api/export/workspace-id on the remote."
             )
 
     async def _fetch_page(
         self,
         *,
         backend_url: str,
+        repo_root: str,
         export_key: str,
         cursor: int,
         limit: int,
     ) -> list[dict]:
         resp = await self._http.get(
             f"{backend_url}/api/export/traces",
-            params={"format": "dpo", "cursor": cursor, "limit": limit},
+            params={
+                "repo_root": repo_root,
+                "format": "dpo",
+                "cursor": cursor,
+                "limit": limit,
+            },
             headers={"Authorization": f"Bearer {export_key}"},
         )
         if resp.status_code == 401:

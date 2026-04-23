@@ -28,28 +28,59 @@ from lean_ai_serve.training.schemas import DatasetFormat
 
 
 class FakeLeanAi:
-    """Minimal FastAPI app that mimics lean_ai's /api/export endpoints."""
+    """Minimal FastAPI app that mimics lean_ai's /api/export endpoints.
 
-    def __init__(self, *, api_key: str = "test-key"):
+    Mirrors the real producer's contract: every endpoint requires
+    ``?repo_root=<path>`` and ``/workspace-id`` returns the hash for that
+    repo_root. Tests that pass a mismatched ``repo_root`` see the same
+    422/mismatch the real backend would return.
+    """
+
+    def __init__(
+        self, *, api_key: str = "test-key", repo_root: str = "/tmp/ws-abc",
+        workspace_id: str = "ws-abc",
+    ):
         self.api_key = api_key
+        self.repo_root = repo_root
+        self.workspace_id = workspace_id
         self._rows: list[dict] = []
         self.app = FastAPI()
         self._register_routes()
 
     def _register_routes(self) -> None:
-        @self.app.get("/api/export/manifest")
-        async def manifest(authorization: str = Header("")):
+        @self.app.get("/api/export/workspace-id")
+        async def workspace_id_endpoint(
+            repo_root: str, authorization: str = Header(""),
+        ):
             self._auth(authorization)
-            return {"schema_version": 1, "max_cursor": self._max_id(), "rows": len(self._rows)}
+            if repo_root != self.repo_root:
+                # Real producer always hashes whatever path you pass, so return
+                # a different id rather than an error — mismatch surfaces in
+                # the ingestor's verification step.
+                return {"workspace_id": f"other-{repo_root}"}
+            return {"workspace_id": self.workspace_id}
+
+        @self.app.get("/api/export/manifest")
+        async def manifest(repo_root: str, authorization: str = Header("")):
+            self._auth(authorization)
+            return {
+                "schema_version": 1,
+                "max_cursor": self._max_id(),
+                "rows": len(self._rows),
+                "workspace_id": self.workspace_id,
+            }
 
         @self.app.get("/api/export/traces")
         async def traces(
+            repo_root: str,
             authorization: str = Header(""),
             fmt: str = Query("dpo", alias="format"),
             cursor: int = Query(0),
             limit: int = Query(500),
         ):
             self._auth(authorization)
+            if repo_root != self.repo_root:
+                raise HTTPException(status_code=404, detail="unknown workspace")
             if fmt != "dpo":
                 raise HTTPException(status_code=400, detail="only dpo supported in fake")
             page = [r for r in self._rows if r["id"] > cursor][:limit]
@@ -136,6 +167,7 @@ async def test_register_workspace_probes_manifest_and_creates_datasets(
         workspace_id="ws-abc",
         display_name="my-workstation",
         backend_url="http://fake",
+        repo_root="/tmp/ws-abc",
         export_key="test-key",
         registered_by="alice",
     )
@@ -166,6 +198,7 @@ async def test_register_workspace_rejects_bad_key(ingestor):
             workspace_id="ws-abc",
             display_name="x",
             backend_url="http://fake",
+            repo_root="/tmp/ws-abc",
             export_key="wrong",
             registered_by="alice",
         )
@@ -175,7 +208,7 @@ async def test_register_workspace_rejects_bad_key(ingestor):
 async def test_register_twice_updates_metadata_not_cursor(ingestor, fake_lean_ai):
     await ingestor.register_workspace(
         workspace_id="ws-abc", display_name="v1",
-        backend_url="http://fake", export_key="test-key", registered_by="alice",
+        backend_url="http://fake", repo_root="/tmp/ws-abc", export_key="test-key", registered_by="alice",
     )
     fake_lean_ai.add_pair(pair_kind="plan_rejection", pair_id="p-1")
     await ingestor.poll_workspace("ws-abc")
@@ -188,7 +221,7 @@ async def test_register_twice_updates_metadata_not_cursor(ingestor, fake_lean_ai
     # Re-register with different display name; cursors should survive.
     info = await ingestor.register_workspace(
         workspace_id="ws-abc", display_name="v2",
-        backend_url="http://fake", export_key="test-key", registered_by="bob",
+        backend_url="http://fake", repo_root="/tmp/ws-abc", export_key="test-key", registered_by="bob",
     )
     assert info.display_name == "v2"
     after_cursor = max(s.last_cursor for s in info.ingest)
@@ -204,7 +237,7 @@ async def test_register_twice_updates_metadata_not_cursor(ingestor, fake_lean_ai
 async def test_poll_appends_dpo_rows_split_by_pair_kind(ingestor, fake_lean_ai):
     await ingestor.register_workspace(
         workspace_id="ws-abc", display_name="x",
-        backend_url="http://fake", export_key="test-key", registered_by="alice",
+        backend_url="http://fake", repo_root="/tmp/ws-abc", export_key="test-key", registered_by="alice",
     )
     fake_lean_ai.add_pair(pair_kind="plan_rejection", pair_id="p-1", chosen="A", rejected="B")
     fake_lean_ai.add_pair(pair_kind="validation_fix", pair_id="v-1", chosen="C", rejected="D")
@@ -237,7 +270,7 @@ async def test_poll_appends_dpo_rows_split_by_pair_kind(ingestor, fake_lean_ai):
 async def test_poll_is_idempotent_when_no_new_rows(ingestor, fake_lean_ai):
     await ingestor.register_workspace(
         workspace_id="ws-abc", display_name="x",
-        backend_url="http://fake", export_key="test-key", registered_by="alice",
+        backend_url="http://fake", repo_root="/tmp/ws-abc", export_key="test-key", registered_by="alice",
     )
     fake_lean_ai.add_pair(pair_kind="plan_rejection", pair_id="p-1")
     await ingestor.poll_workspace("ws-abc")
@@ -251,7 +284,7 @@ async def test_poll_is_idempotent_when_no_new_rows(ingestor, fake_lean_ai):
 async def test_poll_resumes_from_cursor_on_new_rows(ingestor, fake_lean_ai):
     await ingestor.register_workspace(
         workspace_id="ws-abc", display_name="x",
-        backend_url="http://fake", export_key="test-key", registered_by="alice",
+        backend_url="http://fake", repo_root="/tmp/ws-abc", export_key="test-key", registered_by="alice",
     )
     fake_lean_ai.add_pair(pair_kind="plan_rejection", pair_id="p-1")
     first = await ingestor.poll_workspace("ws-abc")
@@ -276,7 +309,7 @@ async def test_poll_paginates_when_more_than_page_limit(ingestor, fake_lean_ai, 
 
     await ingestor.register_workspace(
         workspace_id="ws-abc", display_name="x",
-        backend_url="http://fake", export_key="test-key", registered_by="alice",
+        backend_url="http://fake", repo_root="/tmp/ws-abc", export_key="test-key", registered_by="alice",
     )
     for i in range(5):
         fake_lean_ai.add_pair(pair_kind="plan_rejection", pair_id=f"p-{i}")
@@ -290,7 +323,7 @@ async def test_poll_deduplicates_by_pair_id(ingestor, fake_lean_ai):
     """If lean_ai republishes a pair_id we already have, it should not re-append."""
     await ingestor.register_workspace(
         workspace_id="ws-abc", display_name="x",
-        backend_url="http://fake", export_key="test-key", registered_by="alice",
+        backend_url="http://fake", repo_root="/tmp/ws-abc", export_key="test-key", registered_by="alice",
     )
     fake_lean_ai.add_pair(pair_kind="plan_rejection", pair_id="p-1")
     await ingestor.poll_workspace("ws-abc")
@@ -317,7 +350,7 @@ async def test_poll_deduplicates_by_pair_id(ingestor, fake_lean_ai):
 async def test_poll_records_last_error_and_keeps_going(ingestor, fake_lean_ai, db):
     await ingestor.register_workspace(
         workspace_id="ws-abc", display_name="x",
-        backend_url="http://fake", export_key="test-key", registered_by="alice",
+        backend_url="http://fake", repo_root="/tmp/ws-abc", export_key="test-key", registered_by="alice",
     )
     # Rotate the key on the remote side so subsequent polls fail with 401.
     fake_lean_ai.api_key = "different-key"
@@ -339,8 +372,8 @@ async def test_poll_records_last_error_and_keeps_going(ingestor, fake_lean_ai, d
 
 @pytest.mark.asyncio
 async def test_poll_all_hits_every_enabled_workspace(db, settings, tmp_path):
-    backend_a = FakeLeanAi(api_key="key-a")
-    backend_b = FakeLeanAi(api_key="key-b")
+    backend_a = FakeLeanAi(api_key="key-a", workspace_id="ws-a", repo_root="/tmp/a")
+    backend_b = FakeLeanAi(api_key="key-b", workspace_id="ws-b", repo_root="/tmp/b")
     backend_a.add_pair(pair_kind="plan_rejection", pair_id="a-1")
     backend_b.add_pair(pair_kind="validation_fix", pair_id="b-1")
 
@@ -361,11 +394,13 @@ async def test_poll_all_hits_every_enabled_workspace(db, settings, tmp_path):
 
     await ing.register_workspace(
         workspace_id="ws-a", display_name="a",
-        backend_url="http://a", export_key="key-a", registered_by="u",
+        backend_url="http://a", repo_root="/tmp/a",
+        export_key="key-a", registered_by="u",
     )
     await ing.register_workspace(
         workspace_id="ws-b", display_name="b",
-        backend_url="http://b", export_key="key-b", registered_by="u",
+        backend_url="http://b", repo_root="/tmp/b",
+        export_key="key-b", registered_by="u",
     )
 
     # Disable one — poll_all should skip it.
@@ -388,7 +423,7 @@ async def test_poll_all_hits_every_enabled_workspace(db, settings, tmp_path):
 async def test_delete_soft_disables(ingestor, fake_lean_ai):
     await ingestor.register_workspace(
         workspace_id="ws-abc", display_name="x",
-        backend_url="http://fake", export_key="test-key", registered_by="alice",
+        backend_url="http://fake", repo_root="/tmp/ws-abc", export_key="test-key", registered_by="alice",
     )
     assert await ingestor.delete_workspace("ws-abc", hard=False) is True
     info = await ingestor.get_workspace("ws-abc")
@@ -404,7 +439,7 @@ async def test_delete_soft_disables(ingestor, fake_lean_ai):
 async def test_delete_hard_removes_everything(ingestor, fake_lean_ai):
     await ingestor.register_workspace(
         workspace_id="ws-abc", display_name="x",
-        backend_url="http://fake", export_key="test-key", registered_by="alice",
+        backend_url="http://fake", repo_root="/tmp/ws-abc", export_key="test-key", registered_by="alice",
     )
     assert await ingestor.delete_workspace("ws-abc", hard=True) is True
     assert await ingestor.get_workspace("ws-abc") is None
@@ -444,7 +479,7 @@ async def test_export_key_encrypted_when_encryption_enabled(
 
     await ing.register_workspace(
         workspace_id="ws-abc", display_name="x",
-        backend_url="http://fake", export_key="test-key", registered_by="alice",
+        backend_url="http://fake", repo_root="/tmp/ws-abc", export_key="test-key", registered_by="alice",
     )
 
     row = await db.fetchone(
@@ -459,3 +494,100 @@ async def test_export_key_encrypted_when_encryption_enabled(
     assert result.rows_pulled == 1
 
     await http.aclose()
+
+
+# ---------------------------------------------------------------------------
+# repo_root / workspace_id verification (P0)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_register_rejects_workspace_id_mismatch(ingestor):
+    """User-supplied workspace_id must match hash(salt, repo_root) on the remote."""
+    with pytest.raises(IngestError, match="workspace_id mismatch"):
+        await ingestor.register_workspace(
+            workspace_id="ws-abc",
+            display_name="x",
+            backend_url="http://fake",
+            repo_root="/tmp/something-else",
+            export_key="test-key",
+            registered_by="alice",
+        )
+
+
+@pytest.mark.asyncio
+async def test_register_requires_repo_root(ingestor):
+    with pytest.raises(IngestError, match="repo_root is required"):
+        await ingestor.register_workspace(
+            workspace_id="ws-abc",
+            display_name="x",
+            backend_url="http://fake",
+            repo_root="",
+            export_key="test-key",
+            registered_by="alice",
+        )
+
+
+@pytest.mark.asyncio
+async def test_repo_root_sent_on_every_poll_request(ingestor, fake_lean_ai):
+    """Every /api/export/* call must include ?repo_root= or the real backend 422s."""
+    seen: list[dict] = []
+
+    original = fake_lean_ai.app.router.routes
+
+    # Monkey-patch the fake to record each request's query params.
+    @fake_lean_ai.app.middleware("http")
+    async def record(request, call_next):
+        seen.append({
+            "path": request.url.path,
+            "repo_root": request.query_params.get("repo_root"),
+        })
+        return await call_next(request)
+
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    fake_lean_ai.add_pair(pair_kind="plan_rejection", pair_id="p-1")
+    await ingestor.poll_workspace("ws-abc")
+
+    assert all(entry["repo_root"] == "/tmp/ws-abc" for entry in seen), seen
+    # Make sure we actually covered both workspace-id + traces.
+    paths = {entry["path"] for entry in seen}
+    assert "/api/export/workspace-id" in paths
+    assert "/api/export/traces" in paths
+    # Ensure test leaves no unused-name warnings.
+    assert original is not None
+
+
+@pytest.mark.asyncio
+async def test_workspace_info_exposes_repo_root(ingestor, fake_lean_ai):
+    info = await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    assert info.repo_root == "/tmp/ws-abc"
+    fetched = await ingestor.get_workspace("ws-abc")
+    assert fetched is not None
+    assert fetched.repo_root == "/tmp/ws-abc"
+
+
+@pytest.mark.asyncio
+async def test_poll_fails_cleanly_when_repo_root_missing(ingestor, db, fake_lean_ai):
+    """A legacy row that predates the repo_root column must be re-registered."""
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    # Simulate a pre-migration row by nulling out repo_root.
+    await db.execute(
+        "UPDATE lean_ai_workspaces SET repo_root = NULL WHERE workspace_id = ?",
+        ("ws-abc",),
+    )
+    await db.commit()
+
+    with pytest.raises(IngestError, match="missing repo_root"):
+        await ingestor.poll_workspace("ws-abc")

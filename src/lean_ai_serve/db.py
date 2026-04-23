@@ -149,12 +149,19 @@ revoked_tokens_table = sa.Table(
 # lean_ai workspace registry — tracks remote lean_ai instances that this server
 # polls for DPO/SFT training data.  Export keys are encrypted at rest when
 # encryption.at_rest is enabled; stored as plaintext otherwise.
+#
+# ``repo_root`` is the absolute path on the remote host that identifies which
+# workspace to pull from — every /api/export/* endpoint on lean_ai requires
+# it as a query parameter.  Nullable in the DB so older rows from the initial
+# f9b1fa4 landing can be migrated in place; application code treats it as
+# required and will refuse to poll a workspace with a missing repo_root.
 lean_ai_workspaces_table = sa.Table(
     "lean_ai_workspaces",
     metadata,
     sa.Column("workspace_id", sa.String(64), primary_key=True),
     sa.Column("display_name", sa.String(255), nullable=False),
     sa.Column("backend_url", sa.String(512), nullable=False),
+    sa.Column("repo_root", sa.String(1024)),
     sa.Column("export_key_encrypted", sa.Text, nullable=False),
     sa.Column("registered_by", sa.String(255), nullable=False),
     sa.Column("registered_at", sa.String(64), nullable=False),
@@ -311,9 +318,39 @@ class Database:
         # Create all tables (idempotent — uses IF NOT EXISTS)
         async with self._engine.begin() as conn:
             await conn.run_sync(metadata.create_all)
+            await conn.run_sync(self._apply_column_additions)
 
         self._conn = await self._engine.connect()
         logger.info("Database connected (%s)", self.dialect)
+
+    @staticmethod
+    def _apply_column_additions(conn) -> None:
+        """Add columns that were introduced after a table was first created.
+
+        SQLAlchemy's ``create_all`` only creates missing tables — it never
+        alters an existing one. When we add a new column to a table that
+        already exists in a user's database, we have to issue an
+        ``ALTER TABLE ADD COLUMN`` ourselves. Each additive migration is
+        listed here; they run once per process start and are guarded by a
+        reflection check so they are safe on fresh installs.
+        """
+        inspector = sa.inspect(conn)
+        additions: list[tuple[str, str, str]] = [
+            ("lean_ai_workspaces", "repo_root", "VARCHAR(1024)"),
+        ]
+        for table_name, column_name, sql_type in additions:
+            if not inspector.has_table(table_name):
+                continue
+            existing = {c["name"] for c in inspector.get_columns(table_name)}
+            if column_name in existing:
+                continue
+            conn.exec_driver_sql(
+                f"ALTER TABLE {table_name} ADD COLUMN {column_name} {sql_type}"
+            )
+            logger.info(
+                "Added column %s.%s (%s) to existing table",
+                table_name, column_name, sql_type,
+            )
 
     async def close(self) -> None:
         """Close the database connection."""

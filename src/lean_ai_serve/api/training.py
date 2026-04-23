@@ -410,6 +410,7 @@ async def register_workspace(
             workspace_id=body.workspace_id,
             display_name=body.display_name,
             backend_url=body.backend_url,
+            repo_root=body.repo_root,
             export_key=body.export_key,
             registered_by=user.user_id,
         )

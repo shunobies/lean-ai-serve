@@ -150,6 +150,7 @@ class WorkspaceRegisterRequest(BaseModel):
     workspace_id: str
     display_name: str
     backend_url: str  # e.g. "http://workstation.local:8422"
+    repo_root: str  # Absolute path on the remote host; required by every /api/export/*
     export_key: str  # The Bearer token lean_ai issued for its export API
 
 
@@ -170,6 +171,7 @@ class WorkspaceInfo(BaseModel):
     workspace_id: str
     display_name: str
     backend_url: str
+    repo_root: str | None = None
     registered_by: str
     registered_at: datetime
     enabled: bool
