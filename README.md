@@ -21,7 +21,7 @@ lean-ai-serve wraps [vLLM](https://github.com/vllm-project/vllm) with enterprise
 | **Encryption** | AES-256 encryption at rest, master key from file/env/HashiCorp Vault, config secret patterns (`ENV[]`, `ENC[]`) |
 | **Content Safety** | PHI/PII pattern detection with warn/redact/block actions |
 | **Fine-Tuning** | LoRA training via LLaMA-Factory, dataset management, adapter deployment to running models |
-| **Self-Improvement** | Pull DPO preference pairs from [lean-ai](https://github.com/shunobies/lean-ai) workspaces on a schedule, train adapters on real user feedback, deploy back to the same workspaces |
+| **Self-Improvement** | Ingest every export stream (DPO / SFT / KTO / raw — 11 datasets per workspace) from [lean-ai](https://github.com/shunobies/lean-ai) workspaces on a schedule; deterministic per-workspace eval holdout; dashboard with live list, drill-down, purge; train adapters on real user feedback and deploy back to the same workspaces |
 | **Observability** | Prometheus metrics (zero-dependency), structured logging (JSON/console), OpenTelemetry tracing, alerting |
 | **Web Dashboard** | Built-in server-rendered UI (HTMX + Jinja2 + Pico CSS) — model management, monitoring, security, training, settings. No Node.js required |
 | **Context Compression** | LLMlingua2 prompt compression for long contexts |

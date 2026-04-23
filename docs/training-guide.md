@@ -330,11 +330,11 @@ Training a LoRA adapter on this data makes the planner propose better plans on t
 
 ```mermaid
 flowchart LR
-    A1["lean-ai workspace 1"] -->|GET /api/export/traces| S["lean-ai-serve<br/>(coordinator)"]
-    A2["lean-ai workspace 2"] -->|GET /api/export/traces| S
-    A3["lean-ai workspace 3"] -->|GET /api/export/traces| S
-    S --> D["DPO datasets<br/>(per workspace, per pair_kind)"]
-    D --> T["Training job<br/>(LLaMA-Factory DPO)"]
+    A1["lean-ai workspace 1"] -->|"/api/export/* (11 streams)"| S["lean-ai-serve<br/>(coordinator)"]
+    A2["lean-ai workspace 2"] -->|"/api/export/* (11 streams)"| S
+    A3["lean-ai workspace 3"] -->|"/api/export/* (11 streams)"| S
+    S --> D["Per-workspace datasets<br/>DPO / SFT / KTO / events / memories<br/>(+ :eval siblings)"]
+    D --> T["Training job<br/>(LLaMA-Factory / Axolotl / TRL)"]
     T --> L["LoRA adapter"]
     L --> V["vLLM /load_lora_adapter"]
     V -.->|serve_expert_model| A1
@@ -389,22 +389,15 @@ export LEAN_AI_EXPORT_API_KEY="las-export-$(openssl rand -hex 24)"
 export LEAN_AI_EXPORT_WORKSPACE_SALT="shared-secret"
 ```
 
-3. **Fetch the workspace id** that the lean-ai instance will identify itself as:
-
-```bash
-curl -H "Authorization: Bearer $LEAN_AI_EXPORT_API_KEY" \
-  -X POST http://workstation.local:8422/api/export/workspace-id
-# -> {"workspace_id": "a1b2c3d4e5f6"}
-```
-
 ### Register a workspace
+
+The quickest path is the dashboard's Workspaces tab at `/dashboard/training` — one form, auto-detection of `workspace_id` from the remote, immediate validation. For scripted workflows:
 
 ```bash
 curl -X POST http://localhost:8420/api/training/workspaces \
   -H "Authorization: Bearer las-..." \
   -H "Content-Type: application/json" \
   -d '{
-    "workspace_id": "a1b2c3d4e5f6",
     "display_name": "alice-workstation",
     "backend_url": "http://workstation.local:8422",
     "repo_root": "/home/alice/Code/lean_ai",
@@ -412,19 +405,19 @@ curl -X POST http://localhost:8420/api/training/workspaces \
   }'
 ```
 
-`repo_root` is the absolute path on the workspace host that lean-ai uses to identify its database — lean-ai's export endpoints require it on every request. At registration the coordinator calls `GET /api/export/workspace-id?repo_root=<path>` and rejects the registration if the returned id doesn't match `workspace_id`, so a typo or wrong salt fails fast with `400`. On success, all per-workspace datasets are created empty and ready to receive rows on the next poll.
+`repo_root` is the absolute path on the workspace host that lean-ai uses to identify its database — lean-ai's export endpoints require it on every request. At registration the coordinator calls `GET /api/export/workspace-id?repo_root=<path>` and adopts the returned id. If you already know the id and want to fail fast on a salt mismatch, include it in the body as `"workspace_id": "a1b2c3d4e5f6"` — the registration then rejects with 400 if the remote computes something different. On success, all per-workspace datasets are created empty and ready to receive rows on the next poll.
 
 Export keys are encrypted at rest via AES-256-GCM when `encryption.at_rest` is enabled (same master key used for the audit log).
 
 ### Polling
 
-Once registered, the background scheduler pulls new rows from every enabled workspace every `poll_interval_seconds` (default 600). For each workspace × pair_kind:
+Once registered, the background scheduler pulls new rows from every enabled workspace every `poll_interval_seconds` (default 600). Each cycle:
 
-1. Read `last_cursor` from `lean_ai_ingest_state`.
-2. `GET /api/export/traces?format=dpo&cursor=<last_cursor>&limit=<page_limit>` with the workspace's Bearer key.
-3. Filter rows by `pair_kind`, drop any whose `pair_id` already exists in the dataset file.
-4. Append new rows to the dataset's JSONL file and advance `last_cursor` atomically.
-5. Repeat until the page is short (no more rows upstream).
+1. Fetch `/api/export/manifest` once to learn current per-stream row counts.
+2. Compare against the persisted snapshot — skip any stream whose count is unchanged.
+3. For each stream that moved, paginate with its stream-specific cursor (`id` for trace-backed streams, `since=<iso8601>` for aux streams, payload-hash for the memories snapshot).
+4. Fan rows into per-stream datasets, deduping by the stream's natural key (`pair_id`, `trace_uuid`, `diff_hash`, row content hash, etc.). When `holdout_fraction > 0`, each row is deterministically routed to either the main dataset or its `:eval` sibling.
+5. Write a row to `lean_ai_poll_history` summarising the cycle.
 
 Manual kick-off for a single workspace (e.g. right after registration):
 
@@ -511,16 +504,31 @@ Now the expert phases (planning, validation) route through the fine-tuned adapte
 
 ### Managing registered workspaces
 
+The Workspaces tab under `/dashboard/training` is the everyday management surface — list view with per-row Poll / Disable / Purge / Delete buttons, a filter box, auto-refresh every 30 s, a collapsible Ingestion settings panel, and a per-workspace drill-down with the full stream breakdown and last 50 poll outcomes. The CLI / curl equivalents below are for scripted workflows.
+
 ```bash
-# List workspaces with per-pair-kind cursors + row counts
+# List workspaces with cursors + row counts
 curl -H "Authorization: Bearer las-..." \
   http://localhost:8420/api/training/workspaces
 
-# Soft-disable (keeps datasets + cursors; re-enable with re-register)
+# Force an immediate pull (normally runs on poll_interval_seconds)
+curl -X POST http://localhost:8420/api/training/workspaces/a1b2c3d4e5f6/poll \
+  -H "Authorization: Bearer las-..."
+
+# Soft-disable (keeps datasets + cursors)
 curl -X DELETE http://localhost:8420/api/training/workspaces/a1b2c3d4e5f6 \
   -H "Authorization: Bearer las-..."
 
-# Hard-delete (also removes DPO datasets from disk)
+# Re-enable a soft-disabled workspace
+curl -X POST http://localhost:8420/api/training/workspaces/a1b2c3d4e5f6/enable \
+  -H "Authorization: Bearer las-..."
+
+# Purge data but keep the workspace — empties datasets, resets cursors,
+# leaves the encrypted export key in place so polling resumes cleanly.
+curl -X DELETE http://localhost:8420/api/training/workspaces/a1b2c3d4e5f6/data \
+  -H "Authorization: Bearer las-..."
+
+# Hard-delete (removes registration, datasets, cursors, poll history)
 curl -X DELETE "http://localhost:8420/api/training/workspaces/a1b2c3d4e5f6?hard=true" \
   -H "Authorization: Bearer las-..."
 ```
@@ -528,11 +536,14 @@ curl -X DELETE "http://localhost:8420/api/training/workspaces/a1b2c3d4e5f6?hard=
 ### Security properties
 
 - **Fail-closed on both ends.** lean-ai's export API is disabled unless `LEAN_AI_EXPORT_API_KEY` is set; lean-ai-serve's ingestion endpoints return `503` unless `ingestion.enabled: true`.
+- **Registration verifies the remote's workspace_id.** The coordinator calls `GET /api/export/workspace-id?repo_root=...` before persisting. A salt mismatch or wrong `repo_root` fails fast with 400 instead of silently polling the wrong workspace.
 - **Already anonymized.** Rows emitted by lean-ai have session ids hashed and repo paths rewritten. lean-ai-serve does not need to re-scrub.
 - **Scoped permission.** All workspace endpoints require `workspace:manage` (granted to `admin` and `trainer`). Regular `user` API keys cannot register or poll workspaces.
 - **Encrypted export keys.** When `encryption.at_rest` is enabled, stored export keys are AES-256-GCM encrypted with the same master key the audit log uses.
-- **Cursor-atomic append.** The ingestor writes a page of rows and advances `last_cursor` in one transaction, so a crash mid-poll just replays the last page on next cycle — it never drops or double-counts data.
-- **pair_id dedup.** Even without the cursor, duplicate `pair_id`s are skipped at write time, so re-registering an existing workspace or re-polling a page is always safe.
+- **Cursor-atomic append.** The ingestor writes a page of rows and advances cursors in one transaction, so a crash mid-poll just replays the last page on next cycle — it never drops or double-counts data.
+- **Stream-specific dedup.** Each stream has its own dedup key (DPO: `pair_id`; SFT traces: row-content hash; tool pairs: session+args hash; diff decisions: `diff_hash`; clarifications/phase2: `trace_uuid`; memories: content-hash snapshot). Re-polling a page or re-registering a workspace is always idempotent.
+- **Purge-safe poll lock.** `DELETE /workspaces/{id}/data` acquires the background poller's lock before truncating datasets, so an in-flight pull can't land rows into freshly-cleared files.
+- **Secrets never echoed.** Neither the encrypted export key nor `holdout_salt` appear in any API response or dashboard render — the dashboard config panel shows salt presence as a pill, not the value.
 
 ## CLI Commands
 

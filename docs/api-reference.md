@@ -15,7 +15,7 @@ lean-ai-serve exposes a fully **OpenAI-compatible API**, so any OpenAI SDK or cl
 
 [**lean-ai**](https://github.com/shunobies/lean-ai) is the companion agentic coding assistant that integrates natively with lean-ai-serve. Instead of writing custom HTTP handlers, lean-ai provides a full-featured AI development environment with a VS Code extension, multi-turn planning workflows, codebase indexing, and tool-augmented code generation — all backed by models served from lean-ai-serve.
 
-The integration is **bidirectional**: lean-ai workspaces call lean-ai-serve for inference, and lean-ai-serve can pull DPO preference pairs (plan revisions, validation fix loops) back from those workspaces on a schedule to continuously fine-tune the model that serves them. See the [Training Guide](training-guide.md#lean-ai-workspace-ingestion) for the self-improvement loop.
+The integration is **bidirectional**: lean-ai workspaces call lean-ai-serve for inference, and lean-ai-serve pulls the full training archive back from those workspaces on a schedule — DPO pairs (plan revisions, validation fix loops, tool-call refinements), SFT turns, KTO-labeled traces, phase-2 syntheses, clarifications, diff decisions, workflow events, curated memories, and tool-output compressions — landing each as its own per-workspace dataset ready for fine-tuning. See the [Training Guide](training-guide.md#lean-ai-workspace-ingestion) for the self-improvement loop.
 
 **Setup:**
 
@@ -1930,9 +1930,9 @@ curl -X DELETE http://localhost:8420/api/training/adapters/cs-mistral-v1 \
 
 ---
 
-### Workspaces (lean-ai DPO ingestion)
+### Workspaces (lean-ai ingestion)
 
-lean-ai-serve can act as a coordinator for [lean-ai](https://github.com/shunobies/lean-ai) workspaces: it polls each registered workspace's `/api/export/traces` endpoint on a schedule and lands incoming DPO pairs (plan rejections and validation fixes) as ready-to-train datasets. See the [Training Guide](training-guide.md#lean-ai-workspace-ingestion) for the end-to-end flow and motivation.
+lean-ai-serve acts as a first-class consumer of every export endpoint on [lean-ai](https://github.com/shunobies/lean-ai). A registered workspace produces up to 11 per-workspace datasets (DPO / SFT / KTO / raw), and the coordinator handles the full lifecycle: register, poll, enable, disable, purge data, hard-delete, drill-down. See the [Training Guide](training-guide.md#lean-ai-workspace-ingestion) for the end-to-end flow and motivation.
 
 All workspace endpoints require:
 
@@ -1940,9 +1940,33 @@ All workspace endpoints require:
 - Permission `workspace:manage` (granted to `admin` and `trainer` by default).
 - An export key issued by the remote lean-ai instance (its `LEAN_AI_EXPORT_API_KEY`).
 
+Every poll cycle hits lean-ai's `/api/export/manifest` first. When a per-stream count hasn't changed since the prior poll, that stream's fetch is skipped — idle workspaces cost one round-trip per cycle, not eleven.
+
+#### Ingested datasets (per workspace)
+
+| Dataset name | Format | Source endpoint | Cursor |
+|---|---|---|---|
+| `lean_ai:<ws>:dpo:plan_rejection` | DPO | `/traces?format=dpo` | id |
+| `lean_ai:<ws>:dpo:validation_fix` | DPO | `/traces?format=dpo` | id |
+| `lean_ai:<ws>:sft:traces` | JSONL | `/traces?format=sft` | id |
+| `lean_ai:<ws>:kto:traces` | JSONL | `/traces?format=kto` | id |
+| `lean_ai:<ws>:dpo:tool_calls` | DPO | `/tool-executions?format=dpo_pairs` | since |
+| `lean_ai:<ws>:sft:tool_compressions` | JSONL | `/tool-compressions` | since |
+| `lean_ai:<ws>:sft:phase2` | JSONL | `/phase2-syntheses` | since |
+| `lean_ai:<ws>:sft:clarifications` | JSONL | `/clarifications` | since |
+| `lean_ai:<ws>:kto:diff_decisions` | JSONL | `/diff-decisions` | since |
+| `lean_ai:<ws>:events` | JSONL | `/events` | since |
+| `lean_ai:<ws>:memories` | JSONL | `/memories` | snapshot/replace |
+
+DPO traces are split by `pair_kind` (`plan_rejection`, `validation_fix`, plus any new kinds lean-ai emits — discovered at runtime, dataset created on first sighting). The `memories` dataset is replaced atomically when its sha256 payload hash changes and untouched otherwise.
+
+When `ingestion.holdout_fraction > 0`, every main dataset gets a sibling `<name>:eval` dataset that receives a deterministic fraction of incoming rows, hashed on `(salt, workspace_id, dataset, row_key)`. Bucket assignment is stable across restarts so the held-out eval set is pristine.
+
 #### POST /api/training/workspaces
 
-Register a lean-ai workspace. The server probes the remote `/api/export/manifest` with the supplied key before saving, and creates two empty DPO datasets — one for each `pair_kind` — that subsequent polls will append to.
+Register a lean-ai workspace. The server calls the remote `/api/export/workspace-id` with the supplied `repo_root` and `export_key`; if `workspace_id` is supplied explicitly and the remote computes something different, registration fails fast with 400. Leave `workspace_id` unset to adopt whatever the remote returns.
+
+On success, pre-creates all 11 placeholder datasets and seeds one `lean_ai_ingest_state` row per known `pair_kind`.
 
 **Permission:** `workspace:manage`
 
@@ -1950,56 +1974,26 @@ Register a lean-ai workspace. The server probes the remote `/api/export/manifest
 
 ```json
 {
-  "workspace_id": "a1b2c3d4e5f6",
   "display_name": "alice-workstation",
   "backend_url": "http://workstation.local:8422",
+  "repo_root": "/home/alice/Code/lean_ai",
   "export_key": "las-export-..."
 }
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| workspace_id | string | yes | The stable id returned by `POST /api/export/workspace-id` on the remote lean-ai |
 | display_name | string | yes | Human-friendly label shown in the dashboard |
 | backend_url | string | yes | Base URL of the remote lean-ai backend (e.g. `http://host:8422`) |
+| repo_root | string | yes | Absolute path on the remote host; required by every `/api/export/*` endpoint |
 | export_key | string | yes | Bearer token from the remote lean-ai's `LEAN_AI_EXPORT_API_KEY`. Encrypted at rest when `encryption.at_rest` is enabled |
+| workspace_id | string | no | If omitted, the coordinator calls `GET /api/export/workspace-id` and adopts the returned id. Set explicitly to fail fast on a salt mismatch |
 
-**Response (201):**
+**Response (201):** A `WorkspaceInfo` object — see `GET /api/training/workspaces` below.
 
-```json
-{
-  "workspace_id": "a1b2c3d4e5f6",
-  "display_name": "alice-workstation",
-  "backend_url": "http://workstation.local:8422",
-  "registered_by": "alice",
-  "registered_at": "2026-04-21T14:00:00Z",
-  "enabled": true,
-  "last_polled_at": null,
-  "last_error": null,
-  "ingest": [
-    {
-      "format": "dpo",
-      "pair_kind": "plan_rejection",
-      "last_cursor": 0,
-      "rows_imported": 0,
-      "dataset_name": "lean_ai:a1b2c3d4e5f6:dpo:plan_rejection",
-      "updated_at": "2026-04-21T14:00:00Z"
-    },
-    {
-      "format": "dpo",
-      "pair_kind": "validation_fix",
-      "last_cursor": 0,
-      "rows_imported": 0,
-      "dataset_name": "lean_ai:a1b2c3d4e5f6:dpo:validation_fix",
-      "updated_at": "2026-04-21T14:00:00Z"
-    }
-  ]
-}
-```
+Re-registering an existing `workspace_id` rotates the export key, display name, and `repo_root` but leaves cursors untouched, so resuming a rotated workspace does not re-ingest already-landed rows.
 
-Re-registering an existing `workspace_id` rotates the export key and display name but leaves cursors untouched, so resuming a rotated workspace does not re-ingest already-landed rows.
-
-Returns `400` if the manifest probe fails (bad key, unreachable URL, etc.) and `503` if ingestion is not enabled.
+Returns `400` if the probe or verification fails (bad key, unreachable URL, id mismatch) and `503` if ingestion is not enabled.
 
 **Example:**
 
@@ -2008,9 +2002,9 @@ curl -X POST http://localhost:8420/api/training/workspaces \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "workspace_id": "a1b2c3d4e5f6",
     "display_name": "alice-workstation",
     "backend_url": "http://workstation.local:8422",
+    "repo_root": "/home/alice/Code/lean_ai",
     "export_key": "las-export-..."
   }'
 ```
@@ -2031,6 +2025,7 @@ List all registered workspaces with their current ingestion state.
     "workspace_id": "a1b2c3d4e5f6",
     "display_name": "alice-workstation",
     "backend_url": "http://workstation.local:8422",
+    "repo_root": "/home/alice/Code/lean_ai",
     "registered_by": "alice",
     "registered_at": "2026-04-21T14:00:00Z",
     "enabled": true,
@@ -2058,7 +2053,7 @@ List all registered workspaces with their current ingestion state.
 ]
 ```
 
-The export key is never echoed back.
+The export key is never echoed back. The `ingest` array shows per-`pair_kind` state for the DPO stream; per-stream state for the eight aux streams lives in a separate `lean_ai_stream_cursor` table (not exposed in this payload — use the dashboard drill-down for that detail).
 
 **Example:**
 
@@ -2071,7 +2066,7 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 #### POST /api/training/workspaces/{workspace_id}/poll
 
-Trigger an immediate pull from a single workspace. Useful for testing a registration without waiting for the next scheduled cycle, or for forcing a refresh after rotating an export key.
+Trigger an immediate pull from a single workspace. Useful for testing a registration without waiting for the next scheduled cycle, or for forcing a refresh after rotating an export key. Hits every producer endpoint whose per-stream manifest count has moved since the last successful poll.
 
 **Permission:** `workspace:manage`
 
@@ -2086,21 +2081,39 @@ Trigger an immediate pull from a single workspace. Useful for testing a registra
 ```json
 {
   "workspace_id": "a1b2c3d4e5f6",
-  "rows_pulled": 3,
+  "rows_pulled": 14,
   "datasets_updated": [
     "lean_ai:a1b2c3d4e5f6:dpo:plan_rejection",
-    "lean_ai:a1b2c3d4e5f6:dpo:validation_fix"
+    "lean_ai:a1b2c3d4e5f6:sft:traces",
+    "lean_ai:a1b2c3d4e5f6:sft:phase2"
   ],
   "errors": []
 }
 ```
 
-On remote failure (bad key, unreachable URL) the response still returns `200` with `errors` populated and `rows_pulled: 0`; the workspace's `last_error` field is updated so it's visible in the list view. The scheduler retries on the next cycle automatically.
+On remote failure (bad key, unreachable URL) the response still returns `200` with `errors` populated and `rows_pulled: 0`; the workspace's `last_error` field is updated so it's visible in the list view. The scheduler retries on the next cycle automatically. Every completed cycle writes one row to `lean_ai_poll_history` so the drill-down page can show the last 50 polls.
 
 **Example:**
 
 ```bash
 curl -X POST http://localhost:8420/api/training/workspaces/a1b2c3d4e5f6/poll \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+---
+
+#### POST /api/training/workspaces/{workspace_id}/enable
+
+Re-enable a soft-disabled workspace. Symmetric with `DELETE ?hard=false`. Clears `last_error`. Idempotent on an already-enabled workspace.
+
+**Permission:** `workspace:manage`
+
+**Response:** The updated `WorkspaceInfo` (same shape as `GET /api/training/workspaces`).
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:8420/api/training/workspaces/a1b2c3d4e5f6/enable \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -2122,7 +2135,7 @@ Soft-disable a workspace (default) or hard-delete it and its datasets.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| hard | boolean | `false` | If `false`, sets `enabled=0` but keeps datasets + cursors so the workspace can be re-enabled without re-ingesting. If `true`, removes the workspace row, its cursors, and the underlying DPO datasets from disk |
+| hard | boolean | `false` | If `false`, sets `enabled=0` but keeps datasets + cursors so the workspace can be re-enabled without re-ingesting. If `true`, removes the workspace row, its cursors, its poll history, and every main + `:eval` dataset belonging to the workspace |
 
 **Response:**
 
@@ -2135,14 +2148,82 @@ Or `{ "status": "deleted" }` when `hard=true`.
 **Example:**
 
 ```bash
-# Soft-disable
+# Soft-disable (reversible via /enable above)
 curl -X DELETE http://localhost:8420/api/training/workspaces/a1b2c3d4e5f6 \
   -H "Authorization: Bearer $TOKEN"
 
-# Hard-delete (also removes datasets)
+# Hard-delete (also removes datasets + history)
 curl -X DELETE "http://localhost:8420/api/training/workspaces/a1b2c3d4e5f6?hard=true" \
   -H "Authorization: Bearer $TOKEN"
 ```
+
+---
+
+#### DELETE /api/training/workspaces/{workspace_id}/data
+
+Purge ingested data but keep the workspace registration. A third delete mode between soft-disable (stops pulls, keeps data) and hard-delete (removes everything). Use for data rotation, or to honour a right-to-revoke request without forcing the operator to re-enter credentials.
+
+Truncates every main + `:eval` dataset (including any runtime-discovered `pair_kind` datasets), zeroes every stream cursor, clears the manifest snapshot so the next poll re-pulls from the start, and preserves the workspace row, encrypted export key, and `repo_root` intact. The operation acquires the same lock the background scheduler uses, so in-flight polls can't interleave.
+
+**Permission:** `workspace:manage`
+
+**Response:**
+
+```json
+{
+  "workspace_id": "a1b2c3d4e5f6",
+  "datasets_cleared": [
+    "lean_ai:a1b2c3d4e5f6:dpo:plan_rejection",
+    "lean_ai:a1b2c3d4e5f6:sft:traces"
+  ],
+  "rows_purged": 1423
+}
+```
+
+Only datasets that actually had rows appear in `datasets_cleared`; empty placeholders are not listed.
+
+**Example:**
+
+```bash
+curl -X DELETE http://localhost:8420/api/training/workspaces/a1b2c3d4e5f6/data \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+---
+
+#### POST /api/training/workspaces/{workspace_id}/diff-decision
+
+Forward a user accept/reject decision on a proposed diff to the workspace's own `/api/diffs/decision` endpoint. Lets browser extensions and other clients that only know the coordinator URL record preferences without direct access to the workspace. The coordinator injects the registered `repo_root` into the forwarded body.
+
+The forwarded row flows back into the next poll via `lean_ai:<ws>:kto:diff_decisions`.
+
+**Permission:** `workspace:manage`
+
+**Request body:**
+
+```json
+{
+  "session_id": "s1",
+  "file_path": "src/foo.py",
+  "accepted": false,
+  "diff_hash": "abc123...",
+  "note": "introduces regression",
+  "trace_uuid": "uuid-..."
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| session_id | string | yes | Session id from the extension's view of the workspace |
+| file_path | string | yes | Relative path of the file the diff targets |
+| accepted | bool | yes | Whether the user accepted the proposed diff |
+| diff_hash | string | no | `sha256(diff)[:16]` echoed from the WS `diff` message — lets exports pair this decision with the exact diff the model proposed |
+| note | string | no | Free-form rejection reason (max 2000 chars) |
+| trace_uuid | string | no | Link back to the `training_traces` row that produced the diff |
+
+**Response:** Whatever the workspace's POST returns (typically `{ "stored": true, "id": <row_id> }`).
+
+Returns `404` if the workspace is unknown or disabled, `400` if the forward fails.
 
 ---
 

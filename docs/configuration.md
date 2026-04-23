@@ -545,15 +545,19 @@ training:
 
 ### `ingestion`
 
-Scheduled pull of DPO training data from registered [lean-ai](https://github.com/shunobies/lean-ai) workspaces. Requires `training.enabled: true`. See the [Training Guide](training-guide.md#lean-ai-workspace-ingestion) for the end-to-end flow and the [API Reference](api-reference.md#workspaces-lean-ai-dpo-ingestion) for endpoint details.
+Scheduled pull of training data from registered [lean-ai](https://github.com/shunobies/lean-ai) workspaces. Requires `training.enabled: true`. See the [Training Guide](training-guide.md#lean-ai-workspace-ingestion) for the end-to-end flow and the [API Reference](api-reference.md#workspaces-lean-ai-ingestion) for endpoint details.
+
+Each registered workspace produces up to 11 datasets (DPO / SFT / KTO / raw), pulled from every export endpoint lean-ai exposes. Per-stream manifest gating means idle streams cost one round-trip per poll cycle, not eleven.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | bool | `false` | Enable the ingestion subsystem. When `false`, the `/api/training/workspaces/*` endpoints return `503` and no background polling runs. |
 | `poll_interval_seconds` | int | `600` | Seconds between automatic poll cycles (every registered, enabled workspace is polled per cycle). |
 | `max_concurrent_pulls` | int | `4` | Maximum number of workspaces polled in parallel per cycle. |
-| `page_limit` | int | `500` | Rows per `/api/export/traces` page when pulling from a remote lean-ai workspace. |
+| `page_limit` | int | `500` | Rows per request when pulling from a remote lean-ai endpoint. Per-endpoint caps on the producer side (e.g. 2000 for `/phase2-syntheses`) still apply. |
 | `http_timeout_seconds` | float | `30` | Per-request timeout when calling the remote lean-ai export API. |
+| `holdout_fraction` | float | `0.0` | Fraction of incoming rows to route to a sibling `<name>:eval` dataset for held-out evaluation. Must be in `[0.0, 0.5]`. `0.0` disables the split. Bucketing is deterministic per `(salt, workspace_id, dataset, row_key)` — same row always lands in the same bucket across restarts. |
+| `holdout_salt` | string | `""` | Salt mixed into the holdout hash. Leave empty for a default per-instance salt; set explicitly to get reproducible splits across coordinators or to rotate buckets. The dashboard shows presence only — the value is never echoed. |
 
 ```yaml
 ingestion:
@@ -562,9 +566,11 @@ ingestion:
   max_concurrent_pulls: 8        # Up to 8 workspaces in parallel
   page_limit: 1000
   http_timeout_seconds: 60
+  holdout_fraction: 0.1          # 10% of rows land in :eval siblings
+  holdout_salt: "rotate-2026-q2" # Change to rebucket without losing history
 ```
 
-Export keys supplied at workspace registration are encrypted at rest when `encryption.at_rest.enabled: true` (reusing the same AES-256-GCM master key as the audit log).
+Export keys supplied at workspace registration are encrypted at rest when `encryption.at_rest.enabled: true` (reusing the same AES-256-GCM master key as the audit log). The coordinator additionally maintains three internal tables — `lean_ai_workspaces` (registration metadata), `lean_ai_stream_cursor` (per-stream high-water marks), and `lean_ai_poll_history` (last 50 poll outcomes per workspace, for the dashboard drill-down).
 
 ---
 

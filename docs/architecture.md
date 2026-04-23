@@ -453,7 +453,11 @@ lean-ai-serve uses a pluggable database backend via SQLAlchemy Core. SQLite is t
 | `revoked_tokens` | JWT revocation list | jti, revoked_at, expires_at |
 | `training_jobs` | Fine-tuning jobs | job_id, model, state, dataset, adapter_id |
 | `adapters` | LoRA adapter metadata | name, base_model, source_path, state |
-| `datasets` | Training datasets | name, format, size_bytes, row_count, uploaded_by |
+| `datasets` | Training datasets (includes per-workspace ingested ones + `:eval` siblings) | name, format, size_bytes, row_count, uploaded_by |
+| `lean_ai_workspaces` | Registered lean-ai workspaces for ingestion | workspace_id, display_name, backend_url, repo_root, export_key_encrypted, enabled, last_polled_at, last_error, last_manifest_snapshot, last_schema_version |
+| `lean_ai_ingest_state` | Per-pair_kind DPO stream state | workspace_id, format, pair_kind, last_cursor, rows_imported, dataset_name |
+| `lean_ai_stream_cursor` | Per-stream high-water mark for the 9 non-DPO-pair-kind streams (id, since, or snapshot hash) | workspace_id, format, last_cursor, last_cursor_since, last_snapshot_hash |
+| `lean_ai_poll_history` | Last 50 poll outcomes per workspace (drill-down UI) | workspace_id, started_at, finished_at, rows_pulled, datasets_updated_count, error, duration_ms |
 
 ## Shutdown Sequence
 
