@@ -205,6 +205,26 @@ class TestWorkspacePartials:
         assert 'id="workspace-row-ws-abc"' in resp.text
         assert "alice-workstation" in resp.text
 
+    def test_workspace_rows_expose_filter_key_for_client_side_search(
+        self, app, client, auth_headers,
+    ):
+        """Each row must carry a concatenated lowercase data-filter-key."""
+        info = _make_workspace_info(
+            display_name="Alice Workstation",
+            repo_root="/home/Alice/Code/lean_ai",
+        )
+        _install_ingestor(
+            app, list_workspaces=AsyncMock(return_value=[info]),
+        )
+        resp = client.get(
+            "/dashboard/api/partials/workspace-list",
+            cookies=auth_headers["cookies"],
+        )
+        assert resp.status_code == 200
+        assert 'data-filter-key="alice workstation ws-abc /home/alice/code/lean_ai' in resp.text
+        # Alpine expression must reference $root.filter for client-side filtering.
+        assert "$root.filter" in resp.text
+
     def test_register_requires_csrf(self, client, auth_headers):
         resp = client.post(
             "/dashboard/api/partials/workspaces",

@@ -2,9 +2,12 @@
    table render and as the HTMX swap target for row-level state changes
    (poll, enable, disable, purge). #}
 {% set can_manage = 'workspace:manage' in user_permissions or '*' in user_permissions %}
+{% set filter_key = (workspace.display_name ~ ' ' ~ workspace.workspace_id ~ ' ' ~ (workspace.repo_root or '') ~ ' ' ~ workspace.backend_url) | lower %}
 <tr id="workspace-row-{{ workspace.workspace_id }}"
     class="workspace-row {% if not workspace.enabled %}workspace-disabled{% endif %}"
-    x-data="{ confirming: null }">
+    data-filter-key="{{ filter_key }}"
+    x-data="{ confirming: null }"
+    x-show="!$root.filter || $el.dataset.filterKey.includes($root.filter.toLowerCase())">
     <td>
         <strong>{{ workspace.display_name }}</strong>
         <br>
