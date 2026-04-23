@@ -175,6 +175,24 @@ lean_ai_workspaces_table = sa.Table(
     sa.Column("last_schema_version", sa.Integer),
 )
 
+# One row per poll cycle, per workspace. Capped at 50 newest entries per
+# workspace (trimmed inline on insert — see LeanAiIngestor._record_poll_result).
+# Purely observational: powers the drill-down page's "recent polls" view.
+lean_ai_poll_history_table = sa.Table(
+    "lean_ai_poll_history",
+    metadata,
+    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
+    sa.Column("workspace_id", sa.String(64), nullable=False),
+    sa.Column("started_at", sa.String(64), nullable=False),
+    sa.Column("finished_at", sa.String(64), nullable=False),
+    sa.Column("rows_pulled", sa.Integer, nullable=False, server_default="0"),
+    sa.Column(
+        "datasets_updated_count", sa.Integer, nullable=False, server_default="0",
+    ),
+    sa.Column("error", sa.Text),
+    sa.Column("duration_ms", sa.Integer, nullable=False, server_default="0"),
+)
+
 # One row per ``(workspace_id, format)`` — tracks the high-water-mark cursor
 # for a single /api/export/traces stream. The per-pair_kind state table still
 # records the ``dataset_name`` and ``rows_imported`` for each sub-stream, but
@@ -227,6 +245,11 @@ sa.Index("idx_usage_hour", usage_table.c.hour)
 sa.Index("idx_training_state", training_jobs_table.c.state)
 sa.Index("idx_revoked_expires", revoked_tokens_table.c.expires_at)
 sa.Index("idx_ingest_workspace", lean_ai_ingest_state_table.c.workspace_id)
+sa.Index(
+    "idx_poll_history_workspace_started",
+    lean_ai_poll_history_table.c.workspace_id,
+    lean_ai_poll_history_table.c.started_at.desc(),
+)
 
 
 # ---------------------------------------------------------------------------

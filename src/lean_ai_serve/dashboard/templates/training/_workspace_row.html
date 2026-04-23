@@ -46,6 +46,11 @@
     </td>
     {% if can_manage %}
     <td class="workspace-actions">
+        <a role="button" class="secondary outline"
+           href="/dashboard/training/workspaces/{{ workspace.workspace_id }}"
+           hx-boost="false">
+            Details
+        </a>
         {% if workspace.enabled %}
         <button type="button"
                 hx-post="/dashboard/api/partials/workspaces/{{ workspace.workspace_id }}/poll"

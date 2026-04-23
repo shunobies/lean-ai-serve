@@ -1727,3 +1727,107 @@ async def test_new_streams_also_purge(ingestor, fake_lean_ai):
         ds = await ingestor._datasets.get(name)
         assert ds is not None
         assert ds.row_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Chunk B1 — Poll history + drill-down
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_poll_writes_history_entry_on_success(ingestor, fake_lean_ai):
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    fake_lean_ai.add_pair(pair_kind="plan_rejection", pair_id="p-1")
+    await ingestor.poll_workspace("ws-abc")
+
+    history = await ingestor.get_poll_history("ws-abc")
+    assert len(history) == 1
+    entry = history[0]
+    assert entry.rows_pulled == 1
+    assert entry.datasets_updated_count >= 1
+    assert entry.error is None
+    assert entry.duration_ms >= 0
+
+
+@pytest.mark.asyncio
+async def test_poll_writes_history_entry_on_error(ingestor, fake_lean_ai):
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    # Rotate the key so the next poll fails with 401.
+    fake_lean_ai.api_key = "different-key"
+    await ingestor.poll_workspace("ws-abc")
+
+    history = await ingestor.get_poll_history("ws-abc")
+    assert len(history) == 1
+    assert history[0].error is not None
+    assert "401" in history[0].error
+    assert history[0].rows_pulled == 0
+
+
+@pytest.mark.asyncio
+async def test_poll_history_trimmed_to_50(ingestor, fake_lean_ai, db):
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    # Drive 60 polls. Manifest gate will skip most fetches but history
+    # rows still get written.
+    for _ in range(60):
+        await ingestor.poll_workspace("ws-abc")
+
+    history = await ingestor.get_poll_history("ws-abc", limit=100)
+    assert len(history) == 50
+    # DB count should also be 50 — trim-on-insert is doing its job.
+    row = await db.fetchone(
+        "SELECT COUNT(*) AS c FROM lean_ai_poll_history WHERE workspace_id = ?",
+        ("ws-abc",),
+    )
+    assert row["c"] == 50
+
+
+@pytest.mark.asyncio
+async def test_poll_history_cleared_on_hard_delete(ingestor, fake_lean_ai, db):
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    await ingestor.poll_workspace("ws-abc")
+    assert len(await ingestor.get_poll_history("ws-abc")) == 1
+
+    await ingestor.delete_workspace("ws-abc", hard=True)
+    row = await db.fetchone(
+        "SELECT COUNT(*) AS c FROM lean_ai_poll_history WHERE workspace_id = ?",
+        ("ws-abc",),
+    )
+    assert row["c"] == 0
+
+
+@pytest.mark.asyncio
+async def test_list_workspace_datasets_returns_existing_datasets_only(
+    ingestor, fake_lean_ai,
+):
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    entries = await ingestor.list_workspace_datasets("ws-abc")
+    # After registration: 2 pre-seeded pair_kind datasets + 9 aux datasets
+    # (sft:traces, kto:traces, dpo:tool_calls, sft:tool_compressions,
+    #  sft:phase2, sft:clarifications, kto:diff_decisions, events, memories).
+    assert len(entries) == 11
+    stream_keys = {e["stream_key"] for e in entries}
+    assert "dpo_traces:plan_rejection" in stream_keys
+    assert "sft_traces" in stream_keys
+    assert "memories" in stream_keys
+    # :eval siblings are None when holdout is off.
+    assert all(e["eval_dataset"] is None for e in entries)

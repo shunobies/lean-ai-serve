@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}Workspace — {{ workspace.display_name }}{% endblock %}
+
+{% block content %}
+<section x-data="{ confirming: null }">
+    <p><a href="/dashboard/training" hx-boost="false">← All workspaces</a></p>
+    <h2>{{ workspace.display_name }}</h2>
+    <p>
+        <code>{{ workspace.workspace_id }}</code>
+        {% if workspace.enabled %}
+        <span class="pill pill-success">Enabled</span>
+        {% else %}
+        <span class="pill pill-muted">Disabled</span>
+        {% endif %}
+    </p>
+
+    {# --- Workspace metadata --- #}
+    <article>
+        <header><h3>Metadata</h3></header>
+        <dl class="workspace-meta">
+            <dt>Backend URL</dt>
+            <dd><code>{{ workspace.backend_url }}</code></dd>
+            <dt>Repo root</dt>
+            <dd><code>{{ workspace.repo_root or '—' }}</code></dd>
+            <dt>Registered by</dt>
+            <dd>{{ workspace.registered_by }} on {{ workspace.registered_at.strftime('%Y-%m-%d %H:%M') }}</dd>
+            <dt>Last poll</dt>
+            <dd>
+                {% if workspace.last_polled_at %}
+                {{ workspace.last_polled_at.strftime('%Y-%m-%d %H:%M:%S %Z') }}
+                {% else %}
+                <small class="muted">never</small>
+                {% endif %}
+            </dd>
+            {% if workspace.last_error %}
+            <dt>Last error</dt>
+            <dd>
+                <div class="notice notice-error" role="alert">{{ workspace.last_error }}</div>
+            </dd>
+            {% endif %}
+        </dl>
+    </article>
+
+    {# --- Per-stream row counts --- #}
+    <article>
+        <header><h3>Datasets</h3></header>
+        {% if dataset_entries %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Stream</th>
+                    <th>Dataset</th>
+                    <th>Rows (train)</th>
+                    <th>Rows (eval)</th>
+                    <th>Size</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for entry in dataset_entries %}
+                <tr>
+                    <td><code>{{ entry.stream_key }}</code></td>
+                    <td>
+                        <a href="/dashboard/training" title="See in Datasets tab" hx-boost="false">
+                            <code>{{ entry.dataset.name }}</code>
+                        </a>
+                    </td>
+                    <td>{{ entry.dataset.row_count or 0 }}</td>
+                    <td>
+                        {% if entry.eval_dataset %}
+                        {{ entry.eval_dataset.row_count or 0 }}
+                        {% else %}
+                        <small class="muted">—</small>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% set bytes = entry.dataset.size_bytes or 0 %}
+                        {% if entry.eval_dataset %}
+                        {% set bytes = bytes + (entry.eval_dataset.size_bytes or 0) %}
+                        {% endif %}
+                        {% if bytes < 1024 %}
+                        {{ bytes }} B
+                        {% elif bytes < 1048576 %}
+                        {{ '%.1f' | format(bytes / 1024) }} KB
+                        {% else %}
+                        {{ '%.1f' | format(bytes / 1048576) }} MB
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p class="muted">No datasets yet. The first poll will populate them.</p>
+        {% endif %}
+    </article>
+
+    {# --- Poll history --- #}
+    <article>
+        <header><h3>Recent polls</h3></header>
+        {% if poll_history %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Started</th>
+                    <th>Duration</th>
+                    <th>Rows pulled</th>
+                    <th>Datasets updated</th>
+                    <th>Outcome</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for entry in poll_history %}
+                <tr>
+                    <td>
+                        <time datetime="{{ entry.started_at.isoformat() }}">
+                            {{ entry.started_at.strftime('%Y-%m-%d %H:%M:%S') }}
+                        </time>
+                    </td>
+                    <td>{{ entry.duration_ms }} ms</td>
+                    <td>{{ entry.rows_pulled }}</td>
+                    <td>{{ entry.datasets_updated_count }}</td>
+                    <td>
+                        {% if entry.error %}
+                        <span class="pill pill-error" title="{{ entry.error }}">error</span>
+                        {% else %}
+                        <span class="pill pill-success">ok</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p class="muted">No polls recorded yet.</p>
+        {% endif %}
+    </article>
+</section>
+{% endblock %}

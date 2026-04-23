@@ -283,6 +283,47 @@ async def training_page(request: Request):
     return templates.TemplateResponse(request, "training.html", ctx)
 
 
+@router.get(
+    "/training/workspaces/{workspace_id}", response_class=HTMLResponse,
+)
+async def workspace_detail_page(workspace_id: str, request: Request):
+    """Drill-down page for a single workspace: per-stream rows + poll history."""
+    from datetime import UTC, datetime
+
+    try:
+        user = await require_dashboard_user(request)
+    except _LoginRedirectError:
+        return RedirectResponse("/dashboard/login", status_code=303)
+
+    settings = get_settings()
+    if not settings.training.enabled:
+        return RedirectResponse("/dashboard/", status_code=303)
+
+    ingestor = getattr(request.app.state, "lean_ai_ingestor", None)
+    if ingestor is None:
+        return RedirectResponse("/dashboard/training", status_code=303)
+
+    workspace = await ingestor.get_workspace(workspace_id)
+    if workspace is None:
+        return RedirectResponse("/dashboard/training", status_code=303)
+
+    dataset_entries = await ingestor.list_workspace_datasets(workspace_id)
+    history = await ingestor.get_poll_history(workspace_id, limit=50)
+
+    templates = get_templates()
+    ctx = build_template_context(
+        request, user,
+        workspace=workspace,
+        dataset_entries=dataset_entries,
+        poll_history=history,
+        now_utc=datetime.now(UTC),
+        stale_poll_seconds=2 * settings.ingestion.poll_interval_seconds,
+    )
+    return templates.TemplateResponse(
+        request, "training/_workspace_detail.html", ctx,
+    )
+
+
 @router.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
     """Settings page — read-only config view."""

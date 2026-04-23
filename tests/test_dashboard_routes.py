@@ -116,6 +116,143 @@ class TestAuthenticatedPages:
         assert resp.status_code == 303
         assert resp.headers["location"] == "/dashboard/"
 
+    def test_workspace_detail_renders_with_history_and_datasets(
+        self, app, client, auth_cookie,
+    ):
+        """The drill-down page renders metadata + streams + poll history."""
+        from datetime import UTC, datetime
+
+        from lean_ai_serve.config import (
+            IngestionConfig,
+            TrainingConfig,
+            get_settings,
+            set_settings,
+        )
+        from lean_ai_serve.training.schemas import (
+            DatasetFormat,
+            DatasetInfo,
+            PollHistoryEntry,
+            WorkspaceInfo,
+        )
+
+        settings = get_settings()
+        settings.training = TrainingConfig(enabled=True)
+        settings.ingestion = IngestionConfig(enabled=True)
+        set_settings(settings)
+
+        now = datetime.now(UTC)
+        workspace = WorkspaceInfo(
+            workspace_id="ws-abc",
+            display_name="alice-workstation",
+            backend_url="http://fake:8422",
+            repo_root="/tmp/ws-abc",
+            registered_by="admin",
+            registered_at=now,
+            enabled=True,
+        )
+        ds = DatasetInfo(
+            name="lean_ai:ws-abc:dpo:plan_rejection",
+            path="/tmp/x.jsonl",
+            format=DatasetFormat.DPO,
+            row_count=42,
+            size_bytes=2048,
+            uploaded_by="admin",
+            created_at=now,
+            description="",
+        )
+        history = [
+            PollHistoryEntry(
+                started_at=now,
+                finished_at=now,
+                rows_pulled=5,
+                datasets_updated_count=2,
+                error=None,
+                duration_ms=120,
+            ),
+            PollHistoryEntry(
+                started_at=now,
+                finished_at=now,
+                rows_pulled=0,
+                datasets_updated_count=0,
+                error="boom",
+                duration_ms=80,
+            ),
+        ]
+
+        ingestor = AsyncMock()
+        ingestor.get_workspace = AsyncMock(return_value=workspace)
+        ingestor.list_workspace_datasets = AsyncMock(return_value=[
+            {
+                "stream_key": "dpo_traces:plan_rejection",
+                "dataset": ds,
+                "eval_dataset": None,
+            },
+        ])
+        ingestor.get_poll_history = AsyncMock(return_value=history)
+        app.state.lean_ai_ingestor = ingestor
+
+        resp = client.get(
+            "/dashboard/training/workspaces/ws-abc", cookies=auth_cookie,
+        )
+        assert resp.status_code == 200
+        assert "alice-workstation" in resp.text
+        assert "dpo_traces:plan_rejection" in resp.text
+        assert "Recent polls" in resp.text
+        assert "boom" in resp.text  # error from second history row
+        assert "42" in resp.text  # dataset row_count
+
+    def test_workspace_detail_redirects_when_ingestion_disabled(
+        self, app, client, auth_cookie,
+    ):
+        from lean_ai_serve.config import (
+            IngestionConfig,
+            TrainingConfig,
+            get_settings,
+            set_settings,
+        )
+
+        settings = get_settings()
+        settings.training = TrainingConfig(enabled=True)
+        settings.ingestion = IngestionConfig(enabled=False)
+        set_settings(settings)
+        # No ingestor on app.state simulates ingestion=disabled at boot.
+        if hasattr(app.state, "lean_ai_ingestor"):
+            delattr(app.state, "lean_ai_ingestor")
+
+        resp = client.get(
+            "/dashboard/training/workspaces/ws-abc",
+            cookies=auth_cookie,
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+
+    def test_workspace_detail_redirects_on_unknown_workspace(
+        self, app, client, auth_cookie,
+    ):
+        from lean_ai_serve.config import (
+            IngestionConfig,
+            TrainingConfig,
+            get_settings,
+            set_settings,
+        )
+
+        settings = get_settings()
+        settings.training = TrainingConfig(enabled=True)
+        settings.ingestion = IngestionConfig(enabled=True)
+        set_settings(settings)
+
+        ingestor = AsyncMock()
+        ingestor.get_workspace = AsyncMock(return_value=None)
+        app.state.lean_ai_ingestor = ingestor
+
+        resp = client.get(
+            "/dashboard/training/workspaces/nope",
+            cookies=auth_cookie,
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/dashboard/training"
+
     def test_training_page_renders_workspaces_tab_when_ingestion_enabled(
         self, app, client, auth_cookie,
     ):

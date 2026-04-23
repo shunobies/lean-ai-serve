@@ -196,6 +196,17 @@ class IngestResult(BaseModel):
     errors: list[str] = Field(default_factory=list)
 
 
+class PollHistoryEntry(BaseModel):
+    """One past poll cycle for the drill-down UI."""
+
+    started_at: datetime
+    finished_at: datetime
+    rows_pulled: int
+    datasets_updated_count: int
+    error: str | None = None
+    duration_ms: int
+
+
 class PurgeResult(BaseModel):
     """Summary returned by ``DELETE /workspaces/{id}/data``.
 

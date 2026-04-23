@@ -393,6 +393,10 @@ class LeanAiIngestor:
             (workspace_id,),
         )
         await self._db.execute(
+            "DELETE FROM lean_ai_poll_history WHERE workspace_id = ?",
+            (workspace_id,),
+        )
+        await self._db.execute(
             "DELETE FROM lean_ai_workspaces WHERE workspace_id = ?",
             (workspace_id,),
         )
@@ -550,6 +554,7 @@ class LeanAiIngestor:
             )
         export_key = self._decrypt_key(row["export_key_encrypted"])
         result = IngestResult(workspace_id=workspace_id, rows_pulled=0)
+        started_at = datetime.now(UTC)
 
         try:
             manifest = await self._fetch_manifest(backend_url, repo_root, export_key)
@@ -671,15 +676,21 @@ class LeanAiIngestor:
             await self._persist_manifest(workspace_id, manifest)
         except IngestError as exc:
             result.errors.append(str(exc))
-            await self._record_poll_result(workspace_id, error=str(exc))
+            await self._record_poll_result(
+                workspace_id, started_at=started_at, result=result, error=str(exc),
+            )
             return result
         except httpx.HTTPError as exc:
             msg = f"HTTP error polling {backend_url}: {exc!r}"
             result.errors.append(msg)
-            await self._record_poll_result(workspace_id, error=msg)
+            await self._record_poll_result(
+                workspace_id, started_at=started_at, result=result, error=msg,
+            )
             return result
 
-        await self._record_poll_result(workspace_id, error=None)
+        await self._record_poll_result(
+            workspace_id, started_at=started_at, result=result, error=None,
+        )
         return result
 
     async def forward_diff_decision(
@@ -1703,15 +1714,122 @@ class LeanAiIngestor:
         return _parse_jsonl_response(resp)
 
     async def _record_poll_result(
-        self, workspace_id: str, *, error: str | None
+        self,
+        workspace_id: str,
+        *,
+        started_at: datetime,
+        result: IngestResult,
+        error: str | None,
     ) -> None:
+        finished_at = datetime.now(UTC)
+        duration_ms = max(0, int((finished_at - started_at).total_seconds() * 1000))
         await self._db.execute(
             "UPDATE lean_ai_workspaces "
             "SET last_polled_at = ?, last_error = ? "
             "WHERE workspace_id = ?",
-            (datetime.now(UTC).isoformat(), error, workspace_id),
+            (finished_at.isoformat(), error, workspace_id),
+        )
+        await self._db.execute(
+            "INSERT INTO lean_ai_poll_history "
+            "(workspace_id, started_at, finished_at, rows_pulled, "
+            " datasets_updated_count, error, duration_ms) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                workspace_id,
+                started_at.isoformat(),
+                finished_at.isoformat(),
+                result.rows_pulled,
+                len(result.datasets_updated),
+                error,
+                duration_ms,
+            ),
+        )
+        # Keep only the newest 50 per workspace — the drill-down shows at
+        # most 50 and unbounded growth would eventually matter at scale.
+        await self._db.execute(
+            "DELETE FROM lean_ai_poll_history "
+            "WHERE workspace_id = ? AND id NOT IN ("
+            "  SELECT id FROM lean_ai_poll_history "
+            "  WHERE workspace_id = ? "
+            "  ORDER BY started_at DESC LIMIT 50"
+            ")",
+            (workspace_id, workspace_id),
         )
         await self._db.commit()
+
+    async def list_workspace_datasets(
+        self, workspace_id: str,
+    ) -> list[dict]:
+        """Enumerate every dataset belonging to a workspace for the drill-down.
+
+        Returns one entry per existing dataset (main or ``:eval`` sibling)
+        with the dataset info plus the stream key / pair_kind it represents.
+        Skips datasets that don't exist on disk (e.g. aux streams whose
+        placeholder was deleted), so the drill-down only shows real rows.
+        """
+        entries: list[dict] = []
+
+        # Per-pair_kind DPO datasets (from lean_ai_ingest_state, includes
+        # discovered kinds).
+        pair_rows = await self._db.fetchall(
+            "SELECT pair_kind, dataset_name, rows_imported "
+            "FROM lean_ai_ingest_state "
+            "WHERE workspace_id = ? ORDER BY pair_kind",
+            (workspace_id,),
+        )
+        for r in pair_rows:
+            main = await self._datasets.get(r["dataset_name"])
+            if main is not None:
+                entries.append({
+                    "stream_key": f"dpo_traces:{r['pair_kind']}",
+                    "dataset": main,
+                    "eval_dataset": await self._datasets.get(
+                        _eval_dataset_name(r["dataset_name"]),
+                    ),
+                })
+
+        # Aux streams (SFT, KTO traces; tool-executions; phase2;
+        # clarifications; diff-decisions; events; memories; tool-compressions).
+        for stream_key in _AUX_DATASET_SUFFIX:
+            name = _aux_dataset_name(workspace_id, stream_key)
+            main = await self._datasets.get(name)
+            if main is None:
+                continue
+            entries.append({
+                "stream_key": stream_key,
+                "dataset": main,
+                "eval_dataset": await self._datasets.get(
+                    _eval_dataset_name(name),
+                ),
+            })
+
+        return entries
+
+    async def get_poll_history(
+        self, workspace_id: str, *, limit: int = 50,
+    ) -> list["PollHistoryEntry"]:
+        """Return recent poll records for the drill-down page (newest first)."""
+        from lean_ai_serve.training.schemas import PollHistoryEntry
+
+        rows = await self._db.fetchall(
+            "SELECT started_at, finished_at, rows_pulled, "
+            "       datasets_updated_count, error, duration_ms "
+            "FROM lean_ai_poll_history "
+            "WHERE workspace_id = ? "
+            "ORDER BY started_at DESC LIMIT ?",
+            (workspace_id, limit),
+        )
+        return [
+            PollHistoryEntry(
+                started_at=datetime.fromisoformat(r["started_at"]),
+                finished_at=datetime.fromisoformat(r["finished_at"]),
+                rows_pulled=r["rows_pulled"],
+                datasets_updated_count=r["datasets_updated_count"],
+                error=r["error"],
+                duration_ms=r["duration_ms"],
+            )
+            for r in rows
+        ]
 
 
 # ----------------------------------------------------------------------
