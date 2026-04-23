@@ -55,7 +55,10 @@ SUPPORTED_SCHEMA_VERSION = 1
 
 # Stream identifiers (values stored in lean_ai_stream_cursor.format).
 STREAM_DPO_TRACES = "dpo_traces"
+STREAM_SFT_TRACES = "sft_traces"
+STREAM_KTO_TRACES = "kto_traces"
 STREAM_DPO_TOOL_EXECUTIONS = "dpo_tool_executions"
+STREAM_SFT_TOOL_COMPRESSIONS = "sft_tool_compressions"
 STREAM_SFT_PHASE2 = "sft_phase2"
 STREAM_SFT_CLARIFICATIONS = "sft_clarifications"
 STREAM_KTO_DIFF_DECISIONS = "kto_diff_decisions"
@@ -65,7 +68,10 @@ STREAM_MEMORIES = "memories"
 # Per-stream dataset name suffix. DPO traces keep per-pair_kind datasets (see
 # _dataset_name) so they're not in this map.
 _AUX_DATASET_SUFFIX: dict[str, str] = {
+    STREAM_SFT_TRACES: "sft:traces",
+    STREAM_KTO_TRACES: "kto:traces",
     STREAM_DPO_TOOL_EXECUTIONS: "dpo:tool_calls",
+    STREAM_SFT_TOOL_COMPRESSIONS: "sft:tool_compressions",
     STREAM_SFT_PHASE2: "sft:phase2",
     STREAM_SFT_CLARIFICATIONS: "sft:clarifications",
     STREAM_KTO_DIFF_DECISIONS: "kto:diff_decisions",
@@ -75,7 +81,10 @@ _AUX_DATASET_SUFFIX: dict[str, str] = {
 
 # Dataset format per aux stream.
 _AUX_DATASET_FORMAT: dict[str, DatasetFormat] = {
+    STREAM_SFT_TRACES: DatasetFormat.JSONL,
+    STREAM_KTO_TRACES: DatasetFormat.JSONL,
     STREAM_DPO_TOOL_EXECUTIONS: DatasetFormat.DPO,
+    STREAM_SFT_TOOL_COMPRESSIONS: DatasetFormat.JSONL,
     STREAM_SFT_PHASE2: DatasetFormat.JSONL,
     STREAM_SFT_CLARIFICATIONS: DatasetFormat.JSONL,
     STREAM_KTO_DIFF_DECISIONS: DatasetFormat.JSONL,
@@ -86,8 +95,13 @@ _AUX_DATASET_FORMAT: dict[str, DatasetFormat] = {
 # Manifest count key that gates each aux stream. If the current manifest
 # reports the same count as the last-pulled snapshot, we skip the fetch.
 # ``memories`` is special: its count lives at ``manifest['memories']['total']``.
+# SFT/KTO traces share the training_traces count — if total_traces hasn't
+# grown, neither format has anything new to yield.
 _AUX_MANIFEST_COUNT_KEY: dict[str, str] = {
+    STREAM_SFT_TRACES: "total_traces",
+    STREAM_KTO_TRACES: "total_traces",
     STREAM_DPO_TOOL_EXECUTIONS: "tool_executions",
+    STREAM_SFT_TOOL_COMPRESSIONS: "tool_compressions",
     STREAM_SFT_PHASE2: "phase2_syntheses",
     STREAM_SFT_CLARIFICATIONS: "clarifications",
     STREAM_KTO_DIFF_DECISIONS: "diff_decisions",
@@ -554,6 +568,33 @@ class LeanAiIngestor:
                 )
                 result.datasets_updated.extend(sorted(datasets_written))
 
+            # SFT + KTO traces share the training_traces table with DPO but
+            # hit separate endpoints — use an independent id cursor per
+            # format because the producer's format converters can filter
+            # rows (SFT drops non-success, KTO skips preference=0).
+            for stream_key, fmt_param, dedup_fn in (
+                (STREAM_SFT_TRACES, "sft", _dedup_sft_row),
+                (STREAM_KTO_TRACES, "kto", _dedup_pair_id_or_row),
+            ):
+                if not self._aux_count_changed(
+                    prev_snapshot, manifest, stream_key,
+                ):
+                    continue
+                updated = await self._poll_id_cursor_single_dataset(
+                    workspace_id=workspace_id,
+                    backend_url=backend_url,
+                    repo_root=repo_root,
+                    export_key=export_key,
+                    registered_by=row["registered_by"],
+                    stream_key=stream_key,
+                    endpoint_path="/api/export/traces",
+                    extra_params={"format": fmt_param},
+                    dedup_fn=dedup_fn,
+                    result=result,
+                )
+                if updated:
+                    result.datasets_updated.append(updated)
+
             # Aux streams that share the since-cursor+append pattern.
             for stream_key, endpoint_path, extra_params, dedup_fn in (
                 (
@@ -561,6 +602,12 @@ class LeanAiIngestor:
                     "/api/export/tool-executions",
                     {"format": "dpo_pairs"},
                     _dedup_tool_pair,
+                ),
+                (
+                    STREAM_SFT_TOOL_COMPRESSIONS,
+                    "/api/export/tool-compressions",
+                    {},
+                    _dedup_tool_compression,
                 ),
                 (
                     STREAM_SFT_PHASE2,
@@ -1032,6 +1079,98 @@ class LeanAiIngestor:
         if stream_key == STREAM_DPO_TOOL_EXECUTIONS:
             next_cursor = datetime.now(UTC).isoformat()
         await self._save_since_cursor(workspace_id, stream_key, next_cursor)
+        return dataset_name if appended_total else None
+
+    async def _poll_id_cursor_single_dataset(
+        self,
+        *,
+        workspace_id: str,
+        backend_url: str,
+        repo_root: str,
+        export_key: str,
+        registered_by: str,
+        stream_key: str,
+        endpoint_path: str,
+        extra_params: dict[str, str],
+        dedup_fn,
+        result: IngestResult,
+    ) -> str | None:
+        """Paginate an id-cursor endpoint into a single per-workspace dataset.
+
+        Used by STREAM_SFT_TRACES and STREAM_KTO_TRACES — both pull from
+        ``/api/export/traces`` with different ``format=`` params. Each
+        stream has its own cursor in ``lean_ai_stream_cursor`` because the
+        producer's format converters can filter rows (SFT drops non-success,
+        KTO skips preference=0) and we can't assume the max id seen in
+        one format is also "drained" for the others.
+        """
+        dataset_name = _aux_dataset_name(workspace_id, stream_key)
+        await self._ensure_aux_dataset(
+            workspace_id=workspace_id,
+            stream_key=stream_key,
+            registered_by=registered_by,
+        )
+        seen_keys = await self._load_dedup_keys(dataset_name, dedup_fn)
+
+        cursor = await self._get_stream_cursor(workspace_id, stream_key)
+        page_limit = _stream_page_limit(
+            stream_key, self._settings.ingestion.page_limit,
+        )
+        appended_total = 0
+
+        while True:
+            params: dict[str, Any] = dict(extra_params)
+            params["repo_root"] = repo_root
+            params["cursor"] = cursor
+            params["limit"] = page_limit
+
+            resp = await self._http.get(
+                f"{backend_url}{endpoint_path}",
+                params=params,
+                headers={"Authorization": f"Bearer {export_key}"},
+            )
+            if resp.status_code == 401:
+                raise IngestError("Export key rejected (401)")
+            if resp.status_code >= 400:
+                raise IngestError(
+                    f"{endpoint_path}?format={extra_params.get('format')} "
+                    f"failed ({resp.status_code}): {resp.text[:200]}"
+                )
+            rows = _parse_jsonl_response(resp)
+            if not rows:
+                break
+
+            new_rows: list[dict] = []
+            max_id_in_page = cursor
+            for raw in rows:
+                row_id = _coerce_int(raw.get("id"))
+                if row_id is not None and row_id > max_id_in_page:
+                    max_id_in_page = row_id
+                key = dedup_fn(raw)
+                if key is not None and key in seen_keys:
+                    continue
+                if key is not None:
+                    seen_keys.add(key)
+                new_rows.append({k: v for k, v in raw.items() if k != "id"})
+
+            if new_rows:
+                appended = await self._append_with_holdout(
+                    workspace_id,
+                    dataset_name,
+                    new_rows,
+                    dedup_fn,
+                    registered_by=registered_by,
+                )
+                appended_total += appended
+                result.rows_pulled += appended
+
+            if max_id_in_page > cursor:
+                cursor = max_id_in_page
+                await self._save_stream_cursor(workspace_id, stream_key, cursor)
+                await self._db.commit()
+            if len(rows) < page_limit:
+                break
+
         return dataset_name if appended_total else None
 
     async def _poll_memories_snapshot(
@@ -1624,6 +1763,35 @@ def _dedup_pair_id(row: dict) -> str | None:
     """DPO traces stream: pair_id is the stable identity."""
     pid = row.get("pair_id")
     return str(pid) if pid else None
+
+
+def _dedup_pair_id_or_row(row: dict) -> str | None:
+    """KTO traces: has pair_id per docs, but fall back to row hash if absent."""
+    pid = row.get("pair_id")
+    if pid:
+        return str(pid)
+    return hashlib.sha256(
+        json.dumps(row, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _dedup_sft_row(row: dict) -> str | None:
+    """SFT traces have no pair_id — use a content hash of the whole row."""
+    return hashlib.sha256(
+        json.dumps(row, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _dedup_tool_compression(row: dict) -> str | None:
+    """(session_id, tool_name, created_at) is unique per compression event."""
+    parts = [
+        str(row.get("session_id") or ""),
+        str(row.get("tool_name") or ""),
+        str(row.get("created_at") or ""),
+    ]
+    if not parts[0] or not parts[2]:
+        return None
+    return "|".join(parts)
 
 
 def _dedup_memory(row: dict) -> str | None:

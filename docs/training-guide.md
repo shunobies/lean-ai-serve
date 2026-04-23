@@ -344,13 +344,16 @@ flowchart LR
 
 ### Concepts
 
-Each registered workspace produces **eight** datasets on lean-ai-serve, one per lean-ai export stream:
+Each registered workspace produces **eleven** datasets on lean-ai-serve, one per lean-ai export stream:
 
 | Dataset name | Format | Source endpoint |
 |---|---|---|
 | `lean_ai:<workspace_id>:dpo:plan_rejection` | DPO | `/traces?format=dpo` |
 | `lean_ai:<workspace_id>:dpo:validation_fix` | DPO | `/traces?format=dpo` |
+| `lean_ai:<workspace_id>:sft:traces` | JSONL | `/traces?format=sft` |
+| `lean_ai:<workspace_id>:kto:traces` | JSONL | `/traces?format=kto` |
 | `lean_ai:<workspace_id>:dpo:tool_calls` | DPO | `/tool-executions?format=dpo_pairs` |
+| `lean_ai:<workspace_id>:sft:tool_compressions` | JSONL | `/tool-compressions` |
 | `lean_ai:<workspace_id>:sft:phase2` | JSONL | `/phase2-syntheses` |
 | `lean_ai:<workspace_id>:sft:clarifications` | JSONL | `/clarifications` |
 | `lean_ai:<workspace_id>:kto:diff_decisions` | JSONL | `/diff-decisions` |

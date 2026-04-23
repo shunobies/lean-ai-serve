@@ -19,9 +19,12 @@ from lean_ai_serve.training.lean_ai_ingest import (
     STREAM_DPO_TOOL_EXECUTIONS,
     STREAM_EVENTS,
     STREAM_KTO_DIFF_DECISIONS,
+    STREAM_KTO_TRACES,
     STREAM_MEMORIES,
     STREAM_SFT_CLARIFICATIONS,
     STREAM_SFT_PHASE2,
+    STREAM_SFT_TOOL_COMPRESSIONS,
+    STREAM_SFT_TRACES,
     IngestError,
     LeanAiIngestor,
     _aux_dataset_name,
@@ -53,7 +56,10 @@ class FakeLeanAi:
         self.schema_version = schema_version
         self._rows: list[dict] = []
         # Aux-stream row buffers — one list per producer endpoint.
+        self.sft_traces: list[dict] = []
+        self.kto_traces: list[dict] = []
         self.tool_pairs: list[dict] = []
+        self.tool_compressions: list[dict] = []
         self.phase2: list[dict] = []
         self.clarifications: list[dict] = []
         self.diff_decisions: list[dict] = []
@@ -107,6 +113,7 @@ class FakeLeanAi:
                 "plan_decisions": plan_decisions,
                 "validation_attempts": validation_attempts,
                 "tool_executions": len(self.tool_pairs),
+                "tool_compressions": len(self.tool_compressions),
                 "phase2_syntheses": len(self.phase2),
                 "clarifications": len(self.clarifications),
                 "diff_decisions": len(self.diff_decisions),
@@ -126,9 +133,16 @@ class FakeLeanAi:
             self._auth(authorization)
             if repo_root != self.repo_root:
                 raise HTTPException(status_code=404, detail="unknown workspace")
-            if fmt != "dpo":
-                raise HTTPException(status_code=400, detail="only dpo supported in fake")
-            page = [r for r in self._rows if r["id"] > cursor][:limit]
+            if fmt == "dpo":
+                page = [r for r in self._rows if r["id"] > cursor][:limit]
+            elif fmt == "sft":
+                page = [r for r in self.sft_traces if r["id"] > cursor][:limit]
+            elif fmt == "kto":
+                page = [r for r in self.kto_traces if r["id"] > cursor][:limit]
+            else:
+                raise HTTPException(
+                    status_code=400, detail=f"format '{fmt}' not supported in fake",
+                )
             body = "\n".join(json.dumps(r) for r in page)
             return PlainTextResponse(body, media_type="application/x-ndjson")
 
@@ -147,6 +161,18 @@ class FakeLeanAi:
             src = self.tool_pairs
             if since:
                 src = [r for r in src if r.get("_ts", "") >= since]
+            return self._jsonl(src[:limit])
+
+        @self.app.get("/api/export/tool-compressions")
+        async def tool_compressions(
+            repo_root: str, authorization: str = Header(""),
+            since: str | None = Query(None), limit: int = Query(1000),
+        ):
+            self._auth(authorization)
+            self._check_repo(repo_root)
+            src = self.tool_compressions
+            if since:
+                src = [r for r in src if r.get("created_at", "") >= since]
             return self._jsonl(src[:limit])
 
         @self.app.get("/api/export/phase2-syntheses")
@@ -707,7 +733,12 @@ async def test_workspace_info_exposes_repo_root(ingestor, fake_lean_ai):
 async def test_single_fetch_per_cycle_instead_of_one_per_pair_kind(
     ingestor, fake_lean_ai
 ):
-    """DPO pull must hit /traces once per cycle, not once per pair_kind."""
+    """DPO pull must hit /traces?format=dpo once per cycle, not once per pair_kind.
+
+    Note: since SFT + KTO were added as separate streams (Chunk A), there
+    are now three /traces hits per cycle (one per format) — but the DPO
+    format in particular must not fan out by pair_kind.
+    """
     await ingestor.register_workspace(
         workspace_id="ws-abc", display_name="x",
         backend_url="http://fake", repo_root="/tmp/ws-abc",
@@ -718,10 +749,11 @@ async def test_single_fetch_per_cycle_instead_of_one_per_pair_kind(
     fake_lean_ai.calls.clear()
 
     await ingestor.poll_workspace("ws-abc")
-    traces_hits = [c for c in fake_lean_ai.calls if c["path"] == "/api/export/traces"]
-    # Page size defaults > 2, so a single page covers both rows — and we
-    # only visit /traces once regardless of how many pair_kinds appear.
-    assert len(traces_hits) == 1, fake_lean_ai.calls
+    dpo_hits = [
+        c for c in fake_lean_ai.calls
+        if c["path"] == "/api/export/traces" and c["query"].get("format") == "dpo"
+    ]
+    assert len(dpo_hits) == 1, fake_lean_ai.calls
 
 
 @pytest.mark.asyncio
@@ -1512,3 +1544,186 @@ async def test_register_still_rejects_explicit_mismatch(ingestor):
             export_key="test-key",
             registered_by="alice",
         )
+
+
+# ---------------------------------------------------------------------------
+# Chunk A — SFT + KTO trace streams and tool-compressions
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sft_trace_stream_lands_rows(ingestor, fake_lean_ai):
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    fake_lean_ai.sft_traces.append({
+        "id": 1,
+        "messages": [{"role": "user", "content": "hello"}],
+        "phase": "planning.phase1",
+        "model_name": "qwen3-coder:30b",
+        "workspace_id": "ws-abc",
+    })
+    result = await ingestor.poll_workspace("ws-abc")
+    assert _aux_dataset_name("ws-abc", STREAM_SFT_TRACES) in result.datasets_updated
+    ds = await ingestor._datasets.get(_aux_dataset_name("ws-abc", STREAM_SFT_TRACES))
+    assert ds is not None
+    assert ds.row_count == 1
+
+
+@pytest.mark.asyncio
+async def test_kto_trace_stream_lands_rows(ingestor, fake_lean_ai):
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    fake_lean_ai.kto_traces.append({
+        "id": 1,
+        "prompt": [{"role": "user", "content": "x"}],
+        "completion": {"role": "assistant", "content": "y"},
+        "label": True,
+        "pair_id": "k-1",
+        "workspace_id": "ws-abc",
+        "phase": "planning.phase1",
+        "model_name": "qwen3-coder:30b",
+        "pair_kind": "plan_rejection",
+    })
+    result = await ingestor.poll_workspace("ws-abc")
+    assert _aux_dataset_name("ws-abc", STREAM_KTO_TRACES) in result.datasets_updated
+    ds = await ingestor._datasets.get(_aux_dataset_name("ws-abc", STREAM_KTO_TRACES))
+    assert ds is not None
+    assert ds.row_count == 1
+
+
+@pytest.mark.asyncio
+async def test_sft_dedup_on_repoll_clip(ingestor, fake_lean_ai):
+    """SFT has no pair_id — row-hash dedup must prevent re-writes when the
+    cursor clip re-emits an already-seen row."""
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    fake_lean_ai.sft_traces.append({
+        "id": 1,
+        "messages": [{"role": "user", "content": "same row"}],
+        "phase": "planning.phase1", "model_name": "m", "workspace_id": "ws-abc",
+    })
+    await ingestor.poll_workspace("ws-abc")
+    # Simulate the producer re-emitting the same trace with a new id (e.g.
+    # a backfill on the producer side).
+    fake_lean_ai.sft_traces.append({
+        "id": 999,
+        "messages": [{"role": "user", "content": "same row"}],
+        "phase": "planning.phase1", "model_name": "m", "workspace_id": "ws-abc",
+    })
+    await ingestor.poll_workspace("ws-abc")
+    ds = await ingestor._datasets.get(_aux_dataset_name("ws-abc", STREAM_SFT_TRACES))
+    # Content-identical rows should be deduped to a single line on disk.
+    assert ds is not None
+    assert ds.row_count == 1
+
+
+@pytest.mark.asyncio
+async def test_kto_dedup_by_pair_id(ingestor, fake_lean_ai):
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    row = {
+        "id": 1, "prompt": [], "completion": {}, "label": True,
+        "pair_id": "k-1", "workspace_id": "ws-abc",
+        "phase": "x", "model_name": "m", "pair_kind": "plan_rejection",
+    }
+    fake_lean_ai.kto_traces.append(row)
+    await ingestor.poll_workspace("ws-abc")
+    # Producer re-emits the same pair with a new id.
+    fake_lean_ai.kto_traces.append({**row, "id": 42})
+    await ingestor.poll_workspace("ws-abc")
+    ds = await ingestor._datasets.get(_aux_dataset_name("ws-abc", STREAM_KTO_TRACES))
+    assert ds is not None
+    assert ds.row_count == 1
+
+
+@pytest.mark.asyncio
+async def test_tool_compressions_stream_lands_rows(ingestor, fake_lean_ai):
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    fake_lean_ai.tool_compressions.append({
+        "session_id": "s1", "tool_name": "read_file",
+        "raw_output": "x" * 100, "raw_length": 100,
+        "compressed_output": "short", "compressed_length": 5,
+        "compression_ratio": 0.05, "worker_model": "qwen2.5-coder:7b",
+        "worker_provider": "ollama", "followup_progress": None,
+        "created_at": "2026-04-23T12:00:00+00:00",
+        "workspace_id": "ws-abc",
+    })
+    result = await ingestor.poll_workspace("ws-abc")
+    assert _aux_dataset_name("ws-abc", STREAM_SFT_TOOL_COMPRESSIONS) in result.datasets_updated
+    ds = await ingestor._datasets.get(
+        _aux_dataset_name("ws-abc", STREAM_SFT_TOOL_COMPRESSIONS)
+    )
+    assert ds is not None
+    assert ds.row_count == 1
+
+
+@pytest.mark.asyncio
+async def test_tool_compressions_idle_workspace_has_placeholder_dataset(
+    ingestor, fake_lean_ai,
+):
+    """Workspaces where compression is off upstream still pre-create the empty dataset."""
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    ds = await ingestor._datasets.get(
+        _aux_dataset_name("ws-abc", STREAM_SFT_TOOL_COMPRESSIONS)
+    )
+    assert ds is not None
+    assert ds.row_count == 0
+
+
+@pytest.mark.asyncio
+async def test_new_streams_also_purge(ingestor, fake_lean_ai):
+    """purge_workspace_data must truncate the SFT/KTO/tool_compressions datasets."""
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    fake_lean_ai.sft_traces.append({
+        "id": 1, "messages": [{"role": "user", "content": "z"}],
+        "phase": "x", "model_name": "m", "workspace_id": "ws-abc",
+    })
+    fake_lean_ai.kto_traces.append({
+        "id": 1, "prompt": [], "completion": {}, "label": True,
+        "pair_id": "k-1", "workspace_id": "ws-abc",
+        "phase": "x", "model_name": "m", "pair_kind": "plan_rejection",
+    })
+    fake_lean_ai.tool_compressions.append({
+        "session_id": "s1", "tool_name": "read_file",
+        "raw_output": "x", "raw_length": 1, "compressed_output": "y",
+        "compressed_length": 1, "compression_ratio": 1.0,
+        "worker_model": "m", "worker_provider": "p", "followup_progress": None,
+        "created_at": "2026-04-23T12:00:00+00:00",
+        "workspace_id": "ws-abc",
+    })
+    await ingestor.poll_workspace("ws-abc")
+
+    result = await ingestor.purge_workspace_data("ws-abc")
+    assert result is not None
+    for stream_key in (
+        STREAM_SFT_TRACES, STREAM_KTO_TRACES, STREAM_SFT_TOOL_COMPRESSIONS,
+    ):
+        name = _aux_dataset_name("ws-abc", stream_key)
+        assert name in result.datasets_cleared
+        ds = await ingestor._datasets.get(name)
+        assert ds is not None
+        assert ds.row_count == 0
