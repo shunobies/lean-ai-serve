@@ -257,6 +257,17 @@ async def training_page(request: Request):
     registry = request.app.state.registry
     models = await registry.list_models()
 
+    # Workspaces (lean_ai ingestion) — gracefully absent when ingestion is off
+    from datetime import UTC, datetime
+
+    ingestor = getattr(request.app.state, "lean_ai_ingestor", None)
+    workspaces = []
+    stale_poll_seconds = 0
+    if ingestor is not None:
+        workspaces = await ingestor.list_workspaces()
+        # Amber-banner threshold: 2× the configured poll interval.
+        stale_poll_seconds = 2 * settings.ingestion.poll_interval_seconds
+
     ctx = build_template_context(
         request,
         user,
@@ -264,6 +275,10 @@ async def training_page(request: Request):
         datasets=datasets,
         adapters=adapters,
         models=models,
+        workspaces=workspaces,
+        ingestion_enabled=(ingestor is not None),
+        stale_poll_seconds=stale_poll_seconds,
+        now_utc=datetime.now(UTC),
     )
     return templates.TemplateResponse(request, "training.html", ctx)
 

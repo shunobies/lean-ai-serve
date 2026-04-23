@@ -19,6 +19,18 @@ document.addEventListener('htmx:afterRequest', function(event) {
     }
 });
 
+// Richer toast for workspace purges — surfaces the rows_purged count.
+document.addEventListener('workspacePurged', function(event) {
+    var detail = event.detail || {};
+    var rows = detail.rows_purged;
+    var msg = (rows || rows === 0)
+        ? 'Purged ' + rows + ' row' + (rows === 1 ? '' : 's') + ' from workspace ' + detail.workspace_id
+        : 'Workspace ' + (detail.workspace_id || '') + ' purged';
+    window.dispatchEvent(new CustomEvent('show-toast', {
+        detail: { message: msg, type: 'success' }
+    }));
+});
+
 // Re-initialize any Chart.js canvases after HTMX swaps
 document.addEventListener('htmx:afterSwap', function(event) {
     initCharts(event.target);

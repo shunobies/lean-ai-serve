@@ -145,9 +145,16 @@ class TrainingProgress(BaseModel):
 
 
 class WorkspaceRegisterRequest(BaseModel):
-    """Register a remote lean_ai workspace for DPO data pulls."""
+    """Register a remote lean_ai workspace for DPO data pulls.
 
-    workspace_id: str
+    ``workspace_id`` is optional: when omitted, the coordinator calls
+    ``GET /api/export/workspace-id`` on the remote with the supplied
+    ``repo_root`` + ``export_key`` and uses whatever the producer returns.
+    Pass it explicitly only if you want to fail fast on a mismatch between
+    the claimed id and the remote's computed one.
+    """
+
+    workspace_id: str | None = None
     display_name: str
     backend_url: str  # e.g. "http://workstation.local:8422"
     repo_root: str  # Absolute path on the remote host; required by every /api/export/*

@@ -147,7 +147,7 @@ class LeanAiIngestor:
     async def register_workspace(
         self,
         *,
-        workspace_id: str,
+        workspace_id: str | None = None,
         display_name: str,
         backend_url: str,
         repo_root: str,
@@ -156,21 +156,23 @@ class LeanAiIngestor:
     ) -> WorkspaceInfo:
         """Validate the export key + workspace identity, then persist.
 
-        Calls ``/api/export/workspace-id`` with ``repo_root`` to confirm the
-        remote salt+path pair hashes to the claimed ``workspace_id``. Falls
-        back to probing ``/api/export/manifest`` if ``/workspace-id`` is not
-        available (older producer). On success, creates one dataset per
-        ``pair_kind`` plus one ``lean_ai_ingest_state`` row per ``pair_kind``
-        with ``last_cursor=0``. Re-registering the same workspace_id rotates
-        the export key, display name, and repo_root but leaves cursors
-        untouched.
+        If ``workspace_id`` is supplied, calls ``/api/export/workspace-id``
+        and rejects on mismatch. If it's omitted, calls the same endpoint
+        and adopts whatever id the remote returns — removing the most
+        common registration footgun (the user hashing repo_root with a
+        different salt than the remote). On success, creates one dataset
+        per ``pair_kind`` plus one ``lean_ai_ingest_state`` row per
+        ``pair_kind`` with ``last_cursor=0``. Re-registering the same
+        workspace_id rotates the export key, display name, and repo_root
+        but leaves cursors untouched.
         """
         backend_url = backend_url.rstrip("/")
         if not repo_root:
             raise IngestError("repo_root is required (passed as ?repo_root= on every /api/export/*)")
-        await self._verify_workspace_id(
+        resolved_id = await self._resolve_workspace_id(
             backend_url, export_key, repo_root, claimed_id=workspace_id,
         )
+        workspace_id = resolved_id
 
         encrypted = self._encrypt_key(export_key)
         now = datetime.now(UTC).isoformat()
@@ -382,6 +384,28 @@ class LeanAiIngestor:
         )
         await self._db.commit()
         return True
+
+    async def enable_workspace(self, workspace_id: str) -> WorkspaceInfo | None:
+        """Re-enable a soft-disabled workspace.
+
+        Symmetric with ``delete_workspace(hard=False)``. Clears
+        ``last_error`` so the row returns to a clean state. Returns the
+        updated :class:`WorkspaceInfo`, or None if the workspace doesn't
+        exist. Calling this on an already-enabled workspace is a no-op.
+        """
+        existing = await self._db.fetchone(
+            "SELECT workspace_id FROM lean_ai_workspaces WHERE workspace_id = ?",
+            (workspace_id,),
+        )
+        if existing is None:
+            return None
+        await self._db.execute(
+            "UPDATE lean_ai_workspaces "
+            "SET enabled = 1, last_error = NULL WHERE workspace_id = ?",
+            (workspace_id,),
+        )
+        await self._db.commit()
+        return await self.get_workspace(workspace_id)
 
     async def purge_workspace_data(
         self, workspace_id: str,
@@ -1461,15 +1485,20 @@ class LeanAiIngestor:
         )
         await self._db.commit()
 
-    async def _verify_workspace_id(
+    async def _resolve_workspace_id(
         self,
         backend_url: str,
         export_key: str,
         repo_root: str,
         *,
-        claimed_id: str,
-    ) -> None:
-        """Confirm ``workspace_id`` matches ``hash(salt, repo_root)`` on the remote."""
+        claimed_id: str | None,
+    ) -> str:
+        """Look up the remote's workspace_id and verify or adopt it.
+
+        Calls ``GET /api/export/workspace-id?repo_root=...``. If
+        ``claimed_id`` is set, rejects on mismatch; if it's None, adopts
+        whatever the remote returns. Returns the authoritative id.
+        """
         try:
             resp = await self._http.get(
                 f"{backend_url}/api/export/workspace-id",
@@ -1496,6 +1525,8 @@ class LeanAiIngestor:
             ) from exc
         if not returned:
             raise IngestError("workspace-id response missing 'workspace_id' field")
+        if claimed_id is None:
+            return returned
         if returned != claimed_id:
             raise IngestError(
                 "workspace_id mismatch — remote computed "
@@ -1503,6 +1534,7 @@ class LeanAiIngestor:
                 f"claimed '{claimed_id}'. Use the value returned by "
                 f"GET /api/export/workspace-id on the remote."
             )
+        return returned
 
     async def _fetch_page(
         self,

@@ -1,0 +1,122 @@
+{# One <tr> per registered lean_ai workspace. Used both during initial
+   table render and as the HTMX swap target for row-level state changes
+   (poll, enable, disable, purge). #}
+{% set can_manage = 'workspace:manage' in user_permissions or '*' in user_permissions %}
+<tr id="workspace-row-{{ workspace.workspace_id }}"
+    class="workspace-row {% if not workspace.enabled %}workspace-disabled{% endif %}"
+    x-data="{ confirming: null }">
+    <td>
+        <strong>{{ workspace.display_name }}</strong>
+        <br>
+        <small class="muted"><code>{{ workspace.workspace_id }}</code></small>
+    </td>
+    <td>
+        <code>{{ workspace.backend_url }}</code>
+        <br>
+        <small class="muted">{{ workspace.repo_root or '—' }}</small>
+    </td>
+    <td>
+        {% if workspace.enabled %}
+        <span class="pill pill-success">Enabled</span>
+        {% else %}
+        <span class="pill pill-muted">Disabled</span>
+        {% endif %}
+    </td>
+    <td>
+        {% if workspace.last_polled_at %}
+        <time datetime="{{ workspace.last_polled_at.isoformat() }}">{{ workspace.last_polled_at.strftime('%Y-%m-%d %H:%M') }}</time>
+        {% else %}
+        <small class="muted">never</small>
+        {% endif %}
+        {% if workspace.last_error %}
+        <div class="notice notice-error" role="alert">
+            <small>{{ workspace.last_error }}</small>
+        </div>
+        {% elif workspace.enabled and stale_poll_seconds and workspace.last_polled_at and (now_utc - workspace.last_polled_at).total_seconds() > stale_poll_seconds %}
+        <div class="notice notice-warning" role="status">
+            <small>Last poll older than {{ (stale_poll_seconds // 60) }} min — click "Poll now" to retry.</small>
+        </div>
+        {% endif %}
+    </td>
+    <td>
+        {% set total_imported = workspace.ingest | sum(attribute='rows_imported') %}
+        {{ total_imported }}
+        <br>
+        <small class="muted">across {{ workspace.ingest | length }} datasets</small>
+    </td>
+    {% if can_manage %}
+    <td class="workspace-actions">
+        {% if workspace.enabled %}
+        <button type="button"
+                hx-post="/dashboard/api/partials/workspaces/{{ workspace.workspace_id }}/poll"
+                hx-target="#workspace-row-{{ workspace.workspace_id }}"
+                hx-swap="outerHTML"
+                hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+                hx-disabled-elt="this">
+            Poll now
+        </button>
+        <button type="button"
+                hx-post="/dashboard/api/partials/workspaces/{{ workspace.workspace_id }}/disable"
+                hx-target="#workspace-row-{{ workspace.workspace_id }}"
+                hx-swap="outerHTML"
+                hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
+            Disable
+        </button>
+        <button type="button" class="secondary"
+                @click="confirming='purge'">
+            Purge data
+        </button>
+        {% else %}
+        <button type="button"
+                hx-post="/dashboard/api/partials/workspaces/{{ workspace.workspace_id }}/enable"
+                hx-target="#workspace-row-{{ workspace.workspace_id }}"
+                hx-swap="outerHTML"
+                hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
+            Re-enable
+        </button>
+        {% endif %}
+        <button type="button" class="contrast"
+                @click="confirming='delete'">
+            Delete
+        </button>
+
+        {# --- Purge confirmation modal --- #}
+        <dialog x-show="confirming === 'purge'" @click.outside="confirming=null" :open="confirming === 'purge'">
+            <article>
+                <header><strong>Purge data from {{ workspace.display_name }}?</strong></header>
+                <p>All ingested datasets will be emptied and every cursor reset. The workspace registration and credentials stay intact — the next scheduled poll will re-pull from the beginning.</p>
+                <footer>
+                    <button type="button" class="secondary" @click="confirming=null">Cancel</button>
+                    <button type="button" class="contrast"
+                            hx-delete="/dashboard/api/partials/workspaces/{{ workspace.workspace_id }}/data"
+                            hx-target="#workspace-row-{{ workspace.workspace_id }}"
+                            hx-swap="outerHTML"
+                            hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+                            @click="confirming=null">
+                        Purge data
+                    </button>
+                </footer>
+            </article>
+        </dialog>
+
+        {# --- Delete confirmation modal --- #}
+        <dialog x-show="confirming === 'delete'" @click.outside="confirming=null" :open="confirming === 'delete'">
+            <article>
+                <header><strong>Delete {{ workspace.display_name }}?</strong></header>
+                <p>The workspace registration, encrypted export key, and all ingested datasets (including any <code>:eval</code> holdouts) will be permanently removed. This cannot be undone.</p>
+                <footer>
+                    <button type="button" class="secondary" @click="confirming=null">Cancel</button>
+                    <button type="button" class="contrast"
+                            hx-delete="/dashboard/api/partials/workspaces/{{ workspace.workspace_id }}?hard=true"
+                            hx-target="#workspace-row-{{ workspace.workspace_id }}"
+                            hx-swap="delete"
+                            hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+                            @click="confirming=null">
+                        Delete permanently
+                    </button>
+                </footer>
+            </article>
+        </dialog>
+    </td>
+    {% endif %}
+</tr>

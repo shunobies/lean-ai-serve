@@ -11,6 +11,7 @@
             <li><button :class="{ 'active': tab === 'jobs' }" @click="tab='jobs'">Jobs</button></li>
             <li><button :class="{ 'active': tab === 'datasets' }" @click="tab='datasets'">Datasets</button></li>
             <li><button :class="{ 'active': tab === 'adapters' }" @click="tab='adapters'">Adapters</button></li>
+            <li><button :class="{ 'active': tab === 'workspaces' }" @click="tab='workspaces'">Workspaces</button></li>
         </ul>
     </nav>
 
@@ -33,6 +34,11 @@
     {# Adapters Tab #}
     <div x-show="tab === 'adapters'">
         {% include "training/_adapters.html" %}
+    </div>
+
+    {# Workspaces Tab — lean_ai training-data ingestion #}
+    <div x-show="tab === 'workspaces'">
+        {% include "training/_workspaces.html" %}
     </div>
 </section>
 {% endblock %}

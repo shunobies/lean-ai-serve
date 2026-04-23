@@ -1,0 +1,83 @@
+{# Workspaces tab pane — register form + current-workspaces table. #}
+{% set can_manage = 'workspace:manage' in user_permissions or '*' in user_permissions %}
+
+{% if not ingestion_enabled %}
+<article>
+    <p>Ingestion is disabled. Set <code>ingestion.enabled: true</code> in <code>config.yaml</code> and restart to register lean_ai workspaces here.</p>
+</article>
+{% else %}
+
+{% if can_manage %}
+<article>
+    <header><h3>Register a workspace</h3></header>
+    <form hx-post="/dashboard/api/partials/workspaces"
+          hx-target="#workspaces-list-body"
+          hx-swap="beforeend"
+          hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+          hx-on::after-request="if(event.detail.successful) this.reset()">
+        <div class="grid">
+            <label>
+                Display name
+                <input type="text" name="display_name" placeholder="alice-workstation" required>
+            </label>
+            <label>
+                Backend URL
+                <input type="url" name="backend_url" placeholder="http://workstation.local:8422" required>
+            </label>
+        </div>
+        <div class="grid">
+            <label>
+                Repo root
+                <input type="text" name="repo_root" placeholder="/home/alice/Code/lean_ai" required>
+                <small>Absolute path the lean_ai backend uses to identify its workspace.</small>
+            </label>
+            <label>
+                Export key
+                <input type="password" name="export_key" placeholder="las-export-..." required>
+                <small>Issued by the workspace's <code>LEAN_AI_EXPORT_API_KEY</code>.</small>
+            </label>
+        </div>
+        <details>
+            <summary>Advanced: pin workspace_id</summary>
+            <label>
+                Workspace ID (optional — auto-detected if empty)
+                <input type="text" name="workspace_id" placeholder="leave blank to adopt remote-computed id">
+                <small>Set this only if you want to fail fast on a salt mismatch between what you expect and what the remote computes.</small>
+            </label>
+        </details>
+        <button type="submit">Register</button>
+    </form>
+</article>
+{% endif %}
+
+<div id="workspaces-table">
+    {% if workspaces %}
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Backend</th>
+                <th>Status</th>
+                <th>Last poll</th>
+                <th>Rows ingested</th>
+                {% if can_manage %}<th>Actions</th>{% endif %}
+            </tr>
+        </thead>
+        <tbody id="workspaces-list-body">
+            {% for workspace in workspaces %}
+            {% include "training/_workspace_row.html" %}
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <article><p>No workspaces registered yet.</p></article>
+    <table style="display:none">
+        {# Keep the swap target available so the first register call has
+           somewhere to land its new row without needing to refresh the
+           page. #}
+        <tbody id="workspaces-list-body"></tbody>
+    </table>
+    {% endif %}
+</div>
+
+{% endif %}

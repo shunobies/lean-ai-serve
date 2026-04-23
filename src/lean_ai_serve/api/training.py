@@ -460,6 +460,22 @@ async def delete_workspace(
     return {"status": "deleted" if hard else "disabled"}
 
 
+@router.post("/workspaces/{workspace_id}/enable", response_model=WorkspaceInfo)
+async def enable_workspace(
+    workspace_id: str,
+    request: Request,
+    user: AuthUser = Depends(require_permission("workspace:manage")),
+):
+    """Re-enable a soft-disabled workspace and clear its last_error."""
+    ingestor = _get_ingestor(request)
+    info = await ingestor.enable_workspace(workspace_id)
+    if info is None:
+        raise HTTPException(
+            status_code=404, detail=f"Workspace not found: {workspace_id}"
+        )
+    return info
+
+
 @router.delete("/workspaces/{workspace_id}/data", response_model=PurgeResult)
 async def purge_workspace_data(
     workspace_id: str,

@@ -399,3 +399,222 @@ async def cancel_training_job(job_id: str, request: Request):
     templates = get_templates()
     ctx = build_template_context(request, user, jobs=jobs)
     return templates.TemplateResponse(request, "training/_job_card.html", ctx)
+
+
+# ---------------------------------------------------------------------------
+# Workspaces (lean_ai ingestion) partials
+# ---------------------------------------------------------------------------
+
+
+def _check_workspace_manage(user: AuthUser) -> HTMLResponse | None:
+    """Return a 403 fragment if the caller lacks workspace:manage."""
+    from lean_ai_serve.security.rbac import get_permissions
+
+    perms = get_permissions(user.roles)
+    if "workspace:manage" in perms or "*" in perms:
+        return None
+    return HTMLResponse(
+        "<div class='notice' role='alert'>You lack the workspace:manage permission.</div>",
+        status_code=403,
+    )
+
+
+def _workspace_row_response(
+    request: Request, user: AuthUser, workspace,
+) -> HTMLResponse:
+    """Render a single workspace row — the standard swap target response."""
+    from datetime import UTC, datetime
+
+    from lean_ai_serve.config import get_settings
+
+    templates = get_templates()
+    stale = 2 * get_settings().ingestion.poll_interval_seconds
+    ctx = build_template_context(
+        request, user,
+        workspace=workspace,
+        stale_poll_seconds=stale,
+        now_utc=datetime.now(UTC),
+    )
+    return templates.TemplateResponse(
+        request, "training/_workspace_row.html", ctx,
+    )
+
+
+@router.post("/partials/workspaces", response_class=HTMLResponse)
+async def partial_register_workspace(request: Request):
+    """Register a new workspace from the dashboard form.
+
+    Returns a single-row fragment to append to the table's tbody, or an
+    inline error notice on failure.
+    """
+    try:
+        user = await _require_user_and_csrf(request)
+    except _LoginRedirectError:
+        return HTMLResponse("", status_code=401)
+    denied = _check_workspace_manage(user)
+    if denied is not None:
+        return denied
+
+    ingestor = getattr(request.app.state, "lean_ai_ingestor", None)
+    if ingestor is None:
+        return HTMLResponse(
+            "<div class='notice' role='alert'>Ingestion is disabled.</div>",
+            status_code=503,
+        )
+
+    form = await request.form()
+    # Empty-string workspace_id is treated as "auto-detect from remote".
+    ws_id = form.get("workspace_id", "").strip() or None
+    try:
+        info = await ingestor.register_workspace(
+            workspace_id=ws_id,
+            display_name=form.get("display_name", "").strip(),
+            backend_url=form.get("backend_url", "").strip(),
+            repo_root=form.get("repo_root", "").strip(),
+            export_key=form.get("export_key", "").strip(),
+            registered_by=user.user_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Workspace registration failed")
+        return HTMLResponse(
+            f"<div class='notice' role='alert'>Registration failed: {exc}</div>",
+            status_code=400,
+        )
+    return _workspace_row_response(request, user, info)
+
+
+@router.post(
+    "/partials/workspaces/{workspace_id}/poll", response_class=HTMLResponse,
+)
+async def partial_poll_workspace(workspace_id: str, request: Request):
+    try:
+        user = await _require_user_and_csrf(request)
+    except _LoginRedirectError:
+        return HTMLResponse("", status_code=401)
+    denied = _check_workspace_manage(user)
+    if denied is not None:
+        return denied
+
+    ingestor = request.app.state.lean_ai_ingestor
+    try:
+        await ingestor.poll_workspace(workspace_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("Manual poll for workspace %s failed", workspace_id)
+        # fall through — poll_workspace already stamped last_error
+
+    info = await ingestor.get_workspace(workspace_id)
+    if info is None:
+        return HTMLResponse("", status_code=404)
+    return _workspace_row_response(request, user, info)
+
+
+@router.post(
+    "/partials/workspaces/{workspace_id}/enable", response_class=HTMLResponse,
+)
+async def partial_enable_workspace(workspace_id: str, request: Request):
+    try:
+        user = await _require_user_and_csrf(request)
+    except _LoginRedirectError:
+        return HTMLResponse("", status_code=401)
+    denied = _check_workspace_manage(user)
+    if denied is not None:
+        return denied
+
+    ingestor = request.app.state.lean_ai_ingestor
+    info = await ingestor.enable_workspace(workspace_id)
+    if info is None:
+        return HTMLResponse("", status_code=404)
+    return _workspace_row_response(request, user, info)
+
+
+@router.post(
+    "/partials/workspaces/{workspace_id}/disable", response_class=HTMLResponse,
+)
+async def partial_disable_workspace(workspace_id: str, request: Request):
+    try:
+        user = await _require_user_and_csrf(request)
+    except _LoginRedirectError:
+        return HTMLResponse("", status_code=401)
+    denied = _check_workspace_manage(user)
+    if denied is not None:
+        return denied
+
+    ingestor = request.app.state.lean_ai_ingestor
+    ok = await ingestor.delete_workspace(workspace_id, hard=False)
+    if not ok:
+        return HTMLResponse("", status_code=404)
+    info = await ingestor.get_workspace(workspace_id)
+    if info is None:
+        return HTMLResponse("", status_code=404)
+    return _workspace_row_response(request, user, info)
+
+
+@router.delete(
+    "/partials/workspaces/{workspace_id}/data", response_class=HTMLResponse,
+)
+async def partial_purge_workspace_data(workspace_id: str, request: Request):
+    try:
+        user = await _require_user_and_csrf(request)
+    except _LoginRedirectError:
+        return HTMLResponse("", status_code=401)
+    denied = _check_workspace_manage(user)
+    if denied is not None:
+        return denied
+
+    ingestor = request.app.state.lean_ai_ingestor
+    result = await ingestor.purge_workspace_data(workspace_id)
+    if result is None:
+        return HTMLResponse("", status_code=404)
+    info = await ingestor.get_workspace(workspace_id)
+    if info is None:
+        return HTMLResponse("", status_code=404)
+
+    from datetime import UTC, datetime
+
+    from lean_ai_serve.config import get_settings
+
+    templates = get_templates()
+    stale = 2 * get_settings().ingestion.poll_interval_seconds
+    ctx = build_template_context(
+        request, user,
+        workspace=info,
+        purge_result=result,
+        stale_poll_seconds=stale,
+        now_utc=datetime.now(UTC),
+    )
+    response = templates.TemplateResponse(
+        request, "training/_workspace_row.html", ctx,
+    )
+    # Surface the row count to the user via an HTMX trigger header so a
+    # global listener can toast it.
+    response.headers["HX-Trigger"] = (
+        f'{{"workspacePurged": {{"workspace_id": "{workspace_id}", '
+        f'"rows_purged": {result.rows_purged}}}}}'
+    )
+    return response
+
+
+@router.delete(
+    "/partials/workspaces/{workspace_id}", response_class=HTMLResponse,
+)
+async def partial_delete_workspace(workspace_id: str, request: Request):
+    try:
+        user = await _require_user_and_csrf(request)
+    except _LoginRedirectError:
+        return HTMLResponse("", status_code=401)
+    denied = _check_workspace_manage(user)
+    if denied is not None:
+        return denied
+
+    hard = request.query_params.get("hard", "false").lower() == "true"
+    ingestor = request.app.state.lean_ai_ingestor
+    ok = await ingestor.delete_workspace(workspace_id, hard=hard)
+    if not ok:
+        return HTMLResponse("", status_code=404)
+    if hard:
+        # Empty body + hx-swap="delete" removes the row from the table.
+        return HTMLResponse("", status_code=200)
+    info = await ingestor.get_workspace(workspace_id)
+    if info is None:
+        return HTMLResponse("", status_code=404)
+    return _workspace_row_response(request, user, info)

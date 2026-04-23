@@ -1433,3 +1433,82 @@ async def test_purge_discovered_pair_kind_dataset_is_also_cleared(
     ds = await ingestor._datasets.get(discovered)
     assert ds is not None
     assert ds.row_count == 0
+
+
+# ---------------------------------------------------------------------------
+# enable + optional workspace_id on register (Dashboard support)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_enable_reverses_soft_disable_and_clears_last_error(
+    ingestor, fake_lean_ai, db,
+):
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    # Plant a last_error + soft-disable.
+    await db.execute(
+        "UPDATE lean_ai_workspaces SET last_error = ?, enabled = 0 "
+        "WHERE workspace_id = ?",
+        ("some earlier failure", "ws-abc"),
+    )
+    await db.commit()
+
+    info = await ingestor.enable_workspace("ws-abc")
+    assert info is not None
+    assert info.enabled is True
+    assert info.last_error is None
+
+
+@pytest.mark.asyncio
+async def test_enable_unknown_workspace_returns_none(ingestor):
+    assert await ingestor.enable_workspace("nope") is None
+
+
+@pytest.mark.asyncio
+async def test_enable_is_idempotent_on_already_enabled(
+    ingestor, fake_lean_ai,
+):
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    info1 = await ingestor.enable_workspace("ws-abc")
+    info2 = await ingestor.enable_workspace("ws-abc")
+    assert info1 is not None and info2 is not None
+    assert info1.enabled is True and info2.enabled is True
+
+
+@pytest.mark.asyncio
+async def test_register_adopts_remote_workspace_id_when_none_supplied(
+    ingestor, fake_lean_ai,
+):
+    """Registration without workspace_id uses whatever the remote returns."""
+    info = await ingestor.register_workspace(
+        workspace_id=None,  # left to remote
+        display_name="auto-detected",
+        backend_url="http://fake",
+        repo_root="/tmp/ws-abc",
+        export_key="test-key",
+        registered_by="alice",
+    )
+    # FakeLeanAi's default repo_root="/tmp/ws-abc" hashes to workspace_id="ws-abc".
+    assert info.workspace_id == "ws-abc"
+
+
+@pytest.mark.asyncio
+async def test_register_still_rejects_explicit_mismatch(ingestor):
+    """Supplying a workspace_id that doesn't match must still fail."""
+    with pytest.raises(IngestError, match="workspace_id mismatch"):
+        await ingestor.register_workspace(
+            workspace_id="wrong-id",
+            display_name="x",
+            backend_url="http://fake",
+            repo_root="/tmp/ws-abc",
+            export_key="test-key",
+            registered_by="alice",
+        )

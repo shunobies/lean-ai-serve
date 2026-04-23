@@ -116,6 +116,43 @@ class TestAuthenticatedPages:
         assert resp.status_code == 303
         assert resp.headers["location"] == "/dashboard/"
 
+    def test_training_page_renders_workspaces_tab_when_ingestion_enabled(
+        self, app, client, auth_cookie,
+    ):
+        """The new Workspaces tab must render with an empty-state when no workspaces exist."""
+        from lean_ai_serve.config import (
+            IngestionConfig,
+            TrainingConfig,
+            get_settings,
+            set_settings,
+        )
+
+        # Enable training + ingestion.
+        settings = get_settings()
+        settings.training = TrainingConfig(enabled=True)
+        settings.ingestion = IngestionConfig(enabled=True)
+        set_settings(settings)
+
+        # Minimal state for the training page; workspaces list is empty.
+        orchestrator = AsyncMock()
+        orchestrator.list_jobs = AsyncMock(return_value=[])
+        app.state.training_orchestrator = orchestrator
+        dm = AsyncMock()
+        dm.list_datasets = AsyncMock(return_value=[])
+        app.state.dataset_manager = dm
+        adapters = AsyncMock()
+        adapters.list_adapters = AsyncMock(return_value=[])
+        app.state.adapter_registry = adapters
+        ingestor = AsyncMock()
+        ingestor.list_workspaces = AsyncMock(return_value=[])
+        app.state.lean_ai_ingestor = ingestor
+
+        resp = client.get("/dashboard/training", cookies=auth_cookie)
+        assert resp.status_code == 200
+        assert "Workspaces" in resp.text
+        # Empty state text from the partial.
+        assert "No workspaces registered yet" in resp.text
+
 
 class TestLogout:
     def test_logout_clears_cookie(self, client, auth_cookie):
