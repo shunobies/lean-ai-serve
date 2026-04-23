@@ -7,6 +7,39 @@
 </article>
 {% else %}
 
+{% if ingestion_config %}
+<details class="ingestion-config">
+    <summary><strong>Ingestion settings</strong> <small class="muted">(read-only — edit <code>config.yaml</code> and restart to change)</small></summary>
+    <dl class="workspace-meta">
+        <dt>Poll interval</dt>
+        <dd>every {{ (ingestion_config.poll_interval_seconds // 60) }} min ({{ ingestion_config.poll_interval_seconds }} s)</dd>
+        <dt>Max concurrent pulls</dt>
+        <dd>{{ ingestion_config.max_concurrent_pulls }}</dd>
+        <dt>Page limit</dt>
+        <dd>{{ ingestion_config.page_limit }} rows / request</dd>
+        <dt>HTTP timeout</dt>
+        <dd>{{ ingestion_config.http_timeout_seconds }} s</dd>
+        <dt>Eval holdout</dt>
+        <dd>
+            {% if ingestion_config.holdout_fraction and ingestion_config.holdout_fraction > 0 %}
+            {{ '%.0f' | format(ingestion_config.holdout_fraction * 100) }}% routed to <code>:eval</code> siblings
+            {% else %}
+            <span class="muted">disabled</span>
+            {% endif %}
+        </dd>
+        <dt>Holdout salt</dt>
+        <dd>
+            {% if ingestion_config.holdout_salt_set %}
+            <span class="pill pill-success">set</span>
+            {% else %}
+            <span class="pill pill-muted">empty</span>
+            <small class="muted">— bucketing is still deterministic without a salt</small>
+            {% endif %}
+        </dd>
+    </dl>
+</details>
+{% endif %}
+
 {% if can_manage %}
 <article>
     <header><h3>Register a workspace</h3></header>

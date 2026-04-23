@@ -263,10 +263,22 @@ async def training_page(request: Request):
     ingestor = getattr(request.app.state, "lean_ai_ingestor", None)
     workspaces = []
     stale_poll_seconds = 0
+    ingestion_config_view: dict | None = None
     if ingestor is not None:
         workspaces = await ingestor.list_workspaces()
         # Amber-banner threshold: 2× the configured poll interval.
         stale_poll_seconds = 2 * settings.ingestion.poll_interval_seconds
+        ing = settings.ingestion
+        ingestion_config_view = {
+            "enabled": ing.enabled,
+            "poll_interval_seconds": ing.poll_interval_seconds,
+            "max_concurrent_pulls": ing.max_concurrent_pulls,
+            "page_limit": ing.page_limit,
+            "http_timeout_seconds": ing.http_timeout_seconds,
+            "holdout_fraction": ing.holdout_fraction,
+            # Never echo the salt itself — masked presence only.
+            "holdout_salt_set": bool(ing.holdout_salt),
+        }
 
     ctx = build_template_context(
         request,
@@ -277,6 +289,7 @@ async def training_page(request: Request):
         models=models,
         workspaces=workspaces,
         ingestion_enabled=(ingestor is not None),
+        ingestion_config=ingestion_config_view,
         stale_poll_seconds=stale_poll_seconds,
         now_utc=datetime.now(UTC),
     )

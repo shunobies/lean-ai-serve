@@ -253,6 +253,51 @@ class TestAuthenticatedPages:
         assert resp.status_code == 303
         assert resp.headers["location"] == "/dashboard/training"
 
+    def test_ingestion_config_block_renders_with_masked_salt(
+        self, app, client, auth_cookie,
+    ):
+        """Config display must show the salt presence but never its value."""
+        from lean_ai_serve.config import (
+            IngestionConfig,
+            TrainingConfig,
+            get_settings,
+            set_settings,
+        )
+
+        secret = "top-secret-salt-do-not-leak"
+        settings = get_settings()
+        settings.training = TrainingConfig(enabled=True)
+        settings.ingestion = IngestionConfig(
+            enabled=True,
+            poll_interval_seconds=300,
+            holdout_fraction=0.15,
+            holdout_salt=secret,
+        )
+        set_settings(settings)
+
+        orchestrator = AsyncMock()
+        orchestrator.list_jobs = AsyncMock(return_value=[])
+        app.state.training_orchestrator = orchestrator
+        dm = AsyncMock()
+        dm.list_datasets = AsyncMock(return_value=[])
+        app.state.dataset_manager = dm
+        adapters = AsyncMock()
+        adapters.list_adapters = AsyncMock(return_value=[])
+        app.state.adapter_registry = adapters
+        ingestor = AsyncMock()
+        ingestor.list_workspaces = AsyncMock(return_value=[])
+        app.state.lean_ai_ingestor = ingestor
+
+        resp = client.get("/dashboard/training", cookies=auth_cookie)
+        assert resp.status_code == 200
+        assert "Ingestion settings" in resp.text
+        # Poll interval formatted as "every 5 min" for 300 seconds.
+        assert "every 5 min" in resp.text
+        # Holdout fraction shown as percent.
+        assert "15% routed" in resp.text
+        # Salt value itself MUST NOT appear anywhere on the page.
+        assert secret not in resp.text
+
     def test_training_page_renders_workspaces_tab_when_ingestion_enabled(
         self, app, client, auth_cookie,
     ):
