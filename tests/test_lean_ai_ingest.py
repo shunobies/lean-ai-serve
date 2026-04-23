@@ -16,8 +16,15 @@ from lean_ai_serve.db import Database
 from lean_ai_serve.training.datasets import DatasetManager
 from lean_ai_serve.training.lean_ai_ingest import (
     PAIR_KINDS,
+    STREAM_DPO_TOOL_EXECUTIONS,
+    STREAM_EVENTS,
+    STREAM_KTO_DIFF_DECISIONS,
+    STREAM_MEMORIES,
+    STREAM_SFT_CLARIFICATIONS,
+    STREAM_SFT_PHASE2,
     IngestError,
     LeanAiIngestor,
+    _aux_dataset_name,
     _dataset_name,
 )
 from lean_ai_serve.training.schemas import DatasetFormat
@@ -45,6 +52,13 @@ class FakeLeanAi:
         self.workspace_id = workspace_id
         self.schema_version = schema_version
         self._rows: list[dict] = []
+        # Aux-stream row buffers — one list per producer endpoint.
+        self.tool_pairs: list[dict] = []
+        self.phase2: list[dict] = []
+        self.clarifications: list[dict] = []
+        self.diff_decisions: list[dict] = []
+        self.events: list[dict] = []
+        self.memories: list[dict] = []
         # Every incoming request is recorded here so tests can assert on
         # traffic patterns (single fetch, query params, etc.).
         self.calls: list[dict] = []
@@ -91,6 +105,12 @@ class FakeLeanAi:
                 "total_traces": len(self._rows),
                 "plan_decisions": plan_decisions,
                 "validation_attempts": validation_attempts,
+                "tool_executions": len(self.tool_pairs),
+                "phase2_syntheses": len(self.phase2),
+                "clarifications": len(self.clarifications),
+                "diff_decisions": len(self.diff_decisions),
+                "workflow_events": len(self.events),
+                "memories": {"total": len(self.memories)},
                 "workspace_id": self.workspace_id,
             }
 
@@ -110,6 +130,88 @@ class FakeLeanAi:
             page = [r for r in self._rows if r["id"] > cursor][:limit]
             body = "\n".join(json.dumps(r) for r in page)
             return PlainTextResponse(body, media_type="application/x-ndjson")
+
+        # Aux endpoints — each supports ?since=<iso8601> as the cursor.
+
+        @self.app.get("/api/export/tool-executions")
+        async def tool_executions(
+            repo_root: str,
+            authorization: str = Header(""),
+            fmt: str = Query("dpo_pairs", alias="format"),
+            since: str | None = Query(None),
+            limit: int = Query(1000),
+        ):
+            self._auth(authorization)
+            self._check_repo(repo_root)
+            src = self.tool_pairs
+            if since:
+                src = [r for r in src if r.get("_ts", "") >= since]
+            return self._jsonl(src[:limit])
+
+        @self.app.get("/api/export/phase2-syntheses")
+        async def phase2(
+            repo_root: str, authorization: str = Header(""),
+            since: str | None = Query(None), limit: int = Query(500),
+        ):
+            self._auth(authorization)
+            self._check_repo(repo_root)
+            src = self.phase2
+            if since:
+                src = [r for r in src if r.get("created_at", "") >= since]
+            return self._jsonl(src[:limit])
+
+        @self.app.get("/api/export/clarifications")
+        async def clarifications(
+            repo_root: str, authorization: str = Header(""),
+            since: str | None = Query(None), limit: int = Query(1000),
+        ):
+            self._auth(authorization)
+            self._check_repo(repo_root)
+            src = self.clarifications
+            if since:
+                src = [r for r in src if r.get("created_at", "") >= since]
+            return self._jsonl(src[:limit])
+
+        @self.app.get("/api/export/diff-decisions")
+        async def diff_decisions(
+            repo_root: str, authorization: str = Header(""),
+            since: str | None = Query(None), limit: int = Query(1000),
+        ):
+            self._auth(authorization)
+            self._check_repo(repo_root)
+            src = self.diff_decisions
+            if since:
+                src = [r for r in src if r.get("created_at", "") >= since]
+            return self._jsonl(src[:limit])
+
+        @self.app.get("/api/export/events")
+        async def events(
+            repo_root: str, authorization: str = Header(""),
+            since: str | None = Query(None), limit: int = Query(1000),
+        ):
+            self._auth(authorization)
+            self._check_repo(repo_root)
+            src = self.events
+            if since:
+                src = [r for r in src if r.get("created_at", "") >= since]
+            return self._jsonl(src[:limit])
+
+        @self.app.get("/api/export/memories")
+        async def memories_endpoint(
+            repo_root: str, authorization: str = Header(""),
+            limit: int = Query(500),
+        ):
+            self._auth(authorization)
+            self._check_repo(repo_root)
+            return self._jsonl(self.memories[:limit])
+
+    def _check_repo(self, repo_root: str) -> None:
+        if repo_root != self.repo_root:
+            raise HTTPException(status_code=404, detail="unknown workspace")
+
+    def _jsonl(self, rows: list[dict]):
+        body = "\n".join(json.dumps(r) for r in rows)
+        return PlainTextResponse(body, media_type="application/x-ndjson")
 
     def _auth(self, header: str) -> None:
         if header != f"Bearer {self.api_key}":
@@ -736,3 +838,223 @@ async def test_poll_fails_cleanly_when_repo_root_missing(ingestor, db, fake_lean
 
     with pytest.raises(IngestError, match="missing repo_root"):
         await ingestor.poll_workspace("ws-abc")
+
+
+# ---------------------------------------------------------------------------
+# Aux-stream ingestion (P2)
+# ---------------------------------------------------------------------------
+
+
+def _add_aux_rows(fake: FakeLeanAi) -> None:
+    """Seed every aux stream with a couple of representative rows."""
+    fake.tool_pairs.append({
+        "_ts": "2026-04-23T12:00:00+00:00",
+        "prompt_hint": "edit_file", "session_id": "s1", "phase": "implementation",
+        "rejected": {"arguments": {"path": "/ws/a", "search": "old"}, "result_preview": "ERR"},
+        "chosen": {"arguments": {"path": "/ws/a", "search": "oldval"}, "result_preview": "OK"},
+        "workspace_id": fake.workspace_id,
+    })
+    fake.phase2.append({
+        "session_id": "s1", "task": "add audit log",
+        "scope": "scope", "observations": [], "scratchpad": "", "journal": "",
+        "exploration_output": "", "file_summary": {},
+        "trace_uuid": "uuid-p2-1", "created_at": "2026-04-23T12:01:00+00:00",
+        "workspace_id": fake.workspace_id,
+    })
+    fake.clarifications.append({
+        "session_id": "s1", "phase": "planning.phase1",
+        "task": "add audit log", "question": "split db?", "answer": "main",
+        "outcome": "answered", "trace_uuid": "uuid-clar-1",
+        "created_at": "2026-04-23T12:02:00+00:00",
+        "workspace_id": fake.workspace_id,
+    })
+    fake.diff_decisions.append({
+        "session_id": "s1", "file_path": "/ws/a", "accepted": 0,
+        "diff_hash": "abc123", "note": "regression",
+        "trace_uuid": "uuid-diff-1",
+        "created_at": "2026-04-23T12:03:00+00:00",
+        "workspace_id": fake.workspace_id,
+    })
+    fake.events.append({
+        "session_id": "s1", "event_type": "session_start",
+        "payload": {"primary_model": "qwen3-coder:30b"},
+        "created_at": "2026-04-23T12:04:00+00:00",
+        "workspace_id": fake.workspace_id,
+    })
+    fake.memories.append({
+        "category": "fix_pattern", "content": "prefer TEXT over VARCHAR",
+        "curation_status": "user_confirmed",
+        "workspace_id": fake.workspace_id,
+    })
+
+
+@pytest.mark.asyncio
+async def test_register_creates_aux_datasets(ingestor):
+    """All six aux datasets should exist as empty placeholders post-registration."""
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    for stream_key in (
+        STREAM_DPO_TOOL_EXECUTIONS, STREAM_SFT_PHASE2,
+        STREAM_SFT_CLARIFICATIONS, STREAM_KTO_DIFF_DECISIONS,
+        STREAM_EVENTS, STREAM_MEMORIES,
+    ):
+        ds = await ingestor._datasets.get(
+            _aux_dataset_name("ws-abc", stream_key)
+        )
+        assert ds is not None, stream_key
+        assert ds.row_count == 0
+
+
+@pytest.mark.asyncio
+async def test_aux_streams_pull_rows_from_each_endpoint(ingestor, fake_lean_ai):
+    """Single poll should drain every aux stream into its dataset."""
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    _add_aux_rows(fake_lean_ai)
+    result = await ingestor.poll_workspace("ws-abc")
+
+    # Per-stream ingestion assertions.
+    for stream_key, expected in (
+        (STREAM_DPO_TOOL_EXECUTIONS, 1),
+        (STREAM_SFT_PHASE2, 1),
+        (STREAM_SFT_CLARIFICATIONS, 1),
+        (STREAM_KTO_DIFF_DECISIONS, 1),
+        (STREAM_EVENTS, 1),
+        (STREAM_MEMORIES, 1),
+    ):
+        ds = await ingestor._datasets.get(
+            _aux_dataset_name("ws-abc", stream_key)
+        )
+        assert ds is not None
+        assert ds.row_count == expected, (stream_key, ds.row_count)
+
+    # Each aux dataset should show in datasets_updated.
+    assert _aux_dataset_name("ws-abc", STREAM_DPO_TOOL_EXECUTIONS) in result.datasets_updated
+    assert _aux_dataset_name("ws-abc", STREAM_SFT_PHASE2) in result.datasets_updated
+    assert _aux_dataset_name("ws-abc", STREAM_MEMORIES) in result.datasets_updated
+
+
+@pytest.mark.asyncio
+async def test_aux_stream_dedup_prevents_double_write_on_since_clip(
+    ingestor, fake_lean_ai
+):
+    """Since-cursor is inclusive, so one row gets re-sent — dedup must drop it."""
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    fake_lean_ai.phase2.append({
+        "session_id": "s1", "trace_uuid": "uuid-p2-once",
+        "task": "t", "scope": "", "observations": [], "scratchpad": "",
+        "journal": "", "exploration_output": "", "file_summary": {},
+        "created_at": "2026-04-23T12:01:00+00:00",
+        "workspace_id": "ws-abc",
+    })
+    await ingestor.poll_workspace("ws-abc")
+    # Second poll: producer still has the same row, fake returns it again
+    # because our since filter is >=. The dedup set should keep the file
+    # at row_count=1.
+    await ingestor.poll_workspace("ws-abc")
+    ds = await ingestor._datasets.get(_aux_dataset_name("ws-abc", STREAM_SFT_PHASE2))
+    assert ds is not None
+    assert ds.row_count == 1
+
+
+@pytest.mark.asyncio
+async def test_memories_snapshot_replaces_when_changed(ingestor, fake_lean_ai):
+    """Memories has no cursor — on change, the dataset content must mirror the remote."""
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    fake_lean_ai.memories.append({"category": "fix_pattern", "content": "v1", "workspace_id": "ws-abc"})
+    await ingestor.poll_workspace("ws-abc")
+    ds = await ingestor._datasets.get(_aux_dataset_name("ws-abc", STREAM_MEMORIES))
+    assert ds is not None
+    assert ds.row_count == 1
+
+    # Producer rewrites the memory (v1 → v2).
+    fake_lean_ai.memories[:] = [
+        {"category": "fix_pattern", "content": "v2", "workspace_id": "ws-abc"},
+    ]
+    await ingestor.poll_workspace("ws-abc")
+    ds = await ingestor._datasets.get(_aux_dataset_name("ws-abc", STREAM_MEMORIES))
+    rows = await ingestor._datasets.preview(
+        _aux_dataset_name("ws-abc", STREAM_MEMORIES), limit=10
+    )
+    assert ds is not None
+    assert ds.row_count == 1
+    assert rows[0]["content"] == "v2"
+
+
+@pytest.mark.asyncio
+async def test_memories_snapshot_skips_when_hash_unchanged(ingestor, fake_lean_ai):
+    """Identical memories payload must not trigger a re-write."""
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    fake_lean_ai.memories.append({"category": "x", "content": "v1", "workspace_id": "ws-abc"})
+    await ingestor.poll_workspace("ws-abc")
+
+    mem_path = await ingestor._datasets.get_path(
+        _aux_dataset_name("ws-abc", STREAM_MEMORIES)
+    )
+    assert mem_path is not None
+    mtime_before = Path(mem_path).stat().st_mtime_ns
+
+    await ingestor.poll_workspace("ws-abc")
+    # mtime should not have advanced on the second call.
+    assert Path(mem_path).stat().st_mtime_ns == mtime_before
+
+
+@pytest.mark.asyncio
+async def test_aux_stream_skipped_when_count_unchanged(ingestor, fake_lean_ai):
+    """Per-stream manifest gate: phase2 count holds → no /phase2-syntheses hit."""
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    fake_lean_ai.phase2.append({
+        "session_id": "s1", "trace_uuid": "uuid-p2-gate",
+        "task": "t", "scope": "", "observations": [], "scratchpad": "",
+        "journal": "", "exploration_output": "", "file_summary": {},
+        "created_at": "2026-04-23T12:01:00+00:00", "workspace_id": "ws-abc",
+    })
+    await ingestor.poll_workspace("ws-abc")
+
+    fake_lean_ai.calls.clear()
+    await ingestor.poll_workspace("ws-abc")
+    phase2_hits = [c for c in fake_lean_ai.calls if c["path"] == "/api/export/phase2-syntheses"]
+    assert phase2_hits == []
+
+
+@pytest.mark.asyncio
+async def test_delete_hard_removes_all_aux_datasets(ingestor, fake_lean_ai):
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    _add_aux_rows(fake_lean_ai)
+    await ingestor.poll_workspace("ws-abc")
+
+    assert await ingestor.delete_workspace("ws-abc", hard=True) is True
+    for stream_key in (
+        STREAM_DPO_TOOL_EXECUTIONS, STREAM_SFT_PHASE2,
+        STREAM_SFT_CLARIFICATIONS, STREAM_KTO_DIFF_DECISIONS,
+        STREAM_EVENTS, STREAM_MEMORIES,
+    ):
+        assert await ingestor._datasets.get(
+            _aux_dataset_name("ws-abc", stream_key)
+        ) is None, stream_key

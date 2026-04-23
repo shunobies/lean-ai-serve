@@ -184,8 +184,18 @@ lean_ai_stream_cursor_table = sa.Table(
     "lean_ai_stream_cursor",
     metadata,
     sa.Column("workspace_id", sa.String(64), nullable=False),
-    sa.Column("format", sa.String(16), nullable=False),
+    # Stream identifier (``dpo_traces``, ``dpo_tool_executions``,
+    # ``sft_phase2``, ``sft_clarifications``, ``kto_diff_decisions``,
+    # ``events``, ``memories``). The column is named ``format`` for
+    # historical reasons but now holds a stream key, not a DatasetFormat.
+    sa.Column("format", sa.String(32), nullable=False),
+    # Populated for id-cursor streams (only ``dpo_traces`` today).
     sa.Column("last_cursor", sa.Integer, nullable=False, server_default="0"),
+    # Populated for since-cursor streams (ISO8601 timestamp).
+    sa.Column("last_cursor_since", sa.String(64)),
+    # Populated for snapshot streams (``memories``) — sha256 of the last
+    # pulled payload; if unchanged, we skip the replace.
+    sa.Column("last_snapshot_hash", sa.String(64)),
     sa.Column("updated_at", sa.String(64), nullable=False),
     sa.PrimaryKeyConstraint(
         "workspace_id", "format", name="pk_lean_ai_stream_cursor"
@@ -361,6 +371,8 @@ class Database:
             ("lean_ai_workspaces", "repo_root", "VARCHAR(1024)"),
             ("lean_ai_workspaces", "last_manifest_snapshot", "TEXT"),
             ("lean_ai_workspaces", "last_schema_version", "INTEGER"),
+            ("lean_ai_stream_cursor", "last_cursor_since", "VARCHAR(64)"),
+            ("lean_ai_stream_cursor", "last_snapshot_hash", "VARCHAR(64)"),
         ]
         for table_name, column_name, sql_type in additions:
             if not inspector.has_table(table_name):

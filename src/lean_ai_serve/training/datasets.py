@@ -212,6 +212,50 @@ class DatasetManager:
         await self._db.commit()
         return len(rows)
 
+    async def replace_jsonl(self, name: str, rows: list[dict]) -> int:
+        """Atomically replace an existing JSONL/DPO dataset with the given rows.
+
+        Used by the memories ingestion path, where lean_ai exposes a
+        snapshot endpoint with no cursor: the full curated set is pulled
+        each cycle and we want the landed file to mirror the remote.
+        Writes to a temporary file in the same directory and ``os.replace``s
+        it into place, so partial failure leaves the previous version
+        intact. Returns the number of rows written.
+        """
+        row = await self._db.fetchone(
+            "SELECT path, format FROM datasets WHERE name = ?", (name,)
+        )
+        if row is None:
+            raise ValueError(f"Dataset not found: {name}")
+        fmt = DatasetFormat(row["format"])
+        if fmt not in (DatasetFormat.JSONL, DatasetFormat.DPO):
+            raise ValueError(
+                f"replace_jsonl requires JSONL or DPO format, got {fmt}"
+            )
+
+        data_path = Path(row["path"])
+        payload = "".join(
+            json.dumps(r, separators=(",", ":")) + "\n" for r in rows
+        )
+        payload_bytes = payload.encode("utf-8")
+        if len(payload_bytes) > self._max_size:
+            raise ValueError(
+                f"Replace would exceed max size "
+                f"({len(payload_bytes)} > {self._max_size} bytes)"
+            )
+
+        tmp_path = data_path.with_suffix(data_path.suffix + ".tmp")
+        tmp_path.write_bytes(payload_bytes)
+        import os
+        os.replace(tmp_path, data_path)
+
+        await self._db.execute(
+            "UPDATE datasets SET row_count = ?, size_bytes = ? WHERE name = ?",
+            (len(rows), len(payload_bytes), name),
+        )
+        await self._db.commit()
+        return len(rows)
+
     async def list_datasets(self) -> list[DatasetInfo]:
         """List all datasets."""
         rows = await self._db.fetchall(

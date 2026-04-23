@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 from datetime import UTC, datetime
@@ -50,6 +51,48 @@ PAIR_KINDS = KNOWN_PAIR_KINDS
 # does not emit schema_version today; when it starts, we error on a *lower*
 # value (downgrade = breaking removal by contract) and log on a higher one.
 SUPPORTED_SCHEMA_VERSION = 1
+
+# Stream identifiers (values stored in lean_ai_stream_cursor.format).
+STREAM_DPO_TRACES = "dpo_traces"
+STREAM_DPO_TOOL_EXECUTIONS = "dpo_tool_executions"
+STREAM_SFT_PHASE2 = "sft_phase2"
+STREAM_SFT_CLARIFICATIONS = "sft_clarifications"
+STREAM_KTO_DIFF_DECISIONS = "kto_diff_decisions"
+STREAM_EVENTS = "events"
+STREAM_MEMORIES = "memories"
+
+# Per-stream dataset name suffix. DPO traces keep per-pair_kind datasets (see
+# _dataset_name) so they're not in this map.
+_AUX_DATASET_SUFFIX: dict[str, str] = {
+    STREAM_DPO_TOOL_EXECUTIONS: "dpo:tool_calls",
+    STREAM_SFT_PHASE2: "sft:phase2",
+    STREAM_SFT_CLARIFICATIONS: "sft:clarifications",
+    STREAM_KTO_DIFF_DECISIONS: "kto:diff_decisions",
+    STREAM_EVENTS: "events",
+    STREAM_MEMORIES: "memories",
+}
+
+# Dataset format per aux stream.
+_AUX_DATASET_FORMAT: dict[str, DatasetFormat] = {
+    STREAM_DPO_TOOL_EXECUTIONS: DatasetFormat.DPO,
+    STREAM_SFT_PHASE2: DatasetFormat.JSONL,
+    STREAM_SFT_CLARIFICATIONS: DatasetFormat.JSONL,
+    STREAM_KTO_DIFF_DECISIONS: DatasetFormat.JSONL,
+    STREAM_EVENTS: DatasetFormat.JSONL,
+    STREAM_MEMORIES: DatasetFormat.JSONL,
+}
+
+# Manifest count key that gates each aux stream. If the current manifest
+# reports the same count as the last-pulled snapshot, we skip the fetch.
+# ``memories`` is special: its count lives at ``manifest['memories']['total']``.
+_AUX_MANIFEST_COUNT_KEY: dict[str, str] = {
+    STREAM_DPO_TOOL_EXECUTIONS: "tool_executions",
+    STREAM_SFT_PHASE2: "phase2_syntheses",
+    STREAM_SFT_CLARIFICATIONS: "clarifications",
+    STREAM_KTO_DIFF_DECISIONS: "diff_decisions",
+    STREAM_EVENTS: "workflow_events",
+    STREAM_MEMORIES: "memories.total",
+}
 
 
 class IngestError(Exception):
@@ -165,8 +208,9 @@ class LeanAiIngestor:
                 (display_name, backend_url, repo_root, encrypted, workspace_id),
             )
 
-        # Ensure one dataset + state row per pair_kind exists.
-        for pair_kind in PAIR_KINDS:
+        # Ensure one dataset + state row per known pair_kind exists for the
+        # DPO traces stream (discovery will add more on first sighting).
+        for pair_kind in KNOWN_PAIR_KINDS:
             dataset_name = _dataset_name(workspace_id, pair_kind)
             await self._ensure_dataset(
                 name=dataset_name,
@@ -187,6 +231,15 @@ class LeanAiIngestor:
                 },
                 conflict_columns=["workspace_id", "format", "pair_kind"],
                 on_conflict="ignore",
+            )
+
+        # Pre-create placeholder datasets for each aux stream so operators
+        # can see the full registry for the workspace before data arrives.
+        for stream_key in _AUX_DATASET_SUFFIX:
+            await self._ensure_aux_dataset(
+                workspace_id=workspace_id,
+                stream_key=stream_key,
+                registered_by=registered_by,
             )
 
         await self._db.commit()
@@ -307,6 +360,10 @@ class LeanAiIngestor:
         )
         for s in state_rows:
             await self._datasets.delete(s["dataset_name"])
+        # Aux-stream datasets (memories, events, phase2, clarifications,
+        # diff-decisions, tool-call DPO) — delete even if ingest never wrote.
+        for stream_key in _AUX_DATASET_SUFFIX:
+            await self._datasets.delete(_aux_dataset_name(workspace_id, stream_key))
         await self._db.execute(
             "DELETE FROM lean_ai_ingest_state WHERE workspace_id = ?",
             (workspace_id,),
@@ -356,12 +413,77 @@ class LeanAiIngestor:
         try:
             manifest = await self._fetch_manifest(backend_url, repo_root, export_key)
             self._check_schema_version(manifest)
-            if self._manifest_unchanged(row, manifest):
-                await self._persist_manifest(workspace_id, manifest)
-                await self._record_poll_result(workspace_id, error=None)
-                return result
+            prev_snapshot = self._load_prev_manifest(row)
 
-            datasets_written = await self._poll_dpo_stream(
+            # DPO traces (per-pair_kind fan-out, id cursor).
+            if self._dpo_traces_changed(prev_snapshot, manifest):
+                datasets_written = await self._poll_dpo_stream(
+                    workspace_id=workspace_id,
+                    backend_url=backend_url,
+                    repo_root=repo_root,
+                    export_key=export_key,
+                    registered_by=row["registered_by"],
+                    result=result,
+                )
+                result.datasets_updated.extend(sorted(datasets_written))
+
+            # Aux streams that share the since-cursor+append pattern.
+            for stream_key, endpoint_path, extra_params, dedup_fn in (
+                (
+                    STREAM_DPO_TOOL_EXECUTIONS,
+                    "/api/export/tool-executions",
+                    {"format": "dpo_pairs"},
+                    _dedup_tool_pair,
+                ),
+                (
+                    STREAM_SFT_PHASE2,
+                    "/api/export/phase2-syntheses",
+                    {},
+                    _dedup_trace_uuid_required,
+                ),
+                (
+                    STREAM_SFT_CLARIFICATIONS,
+                    "/api/export/clarifications",
+                    {},
+                    _dedup_clarification,
+                ),
+                (
+                    STREAM_KTO_DIFF_DECISIONS,
+                    "/api/export/diff-decisions",
+                    {},
+                    _dedup_diff_decision,
+                ),
+                (
+                    STREAM_EVENTS,
+                    "/api/export/events",
+                    {},
+                    _dedup_event,
+                ),
+            ):
+                if not self._aux_count_changed(
+                    prev_snapshot, manifest, stream_key,
+                ):
+                    continue
+                updated = await self._poll_since_stream(
+                    workspace_id=workspace_id,
+                    backend_url=backend_url,
+                    repo_root=repo_root,
+                    export_key=export_key,
+                    registered_by=row["registered_by"],
+                    stream_key=stream_key,
+                    endpoint_path=endpoint_path,
+                    extra_params=extra_params,
+                    dedup_fn=dedup_fn,
+                    result=result,
+                )
+                if updated:
+                    result.datasets_updated.append(updated)
+
+            # Memories is snapshot-only — no cursor. The count gate is
+            # unreliable here because an edit to an existing memory doesn't
+            # change the total; the internal payload-hash check is the real
+            # skip mechanism, and it's cheap (the endpoint caps at 5000 rows).
+            mem_updated = await self._poll_memories_snapshot(
                 workspace_id=workspace_id,
                 backend_url=backend_url,
                 repo_root=repo_root,
@@ -369,7 +491,8 @@ class LeanAiIngestor:
                 registered_by=row["registered_by"],
                 result=result,
             )
-            result.datasets_updated.extend(sorted(datasets_written))
+            if mem_updated:
+                result.datasets_updated.append(mem_updated)
 
             await self._persist_manifest(workspace_id, manifest)
         except IngestError as exc:
@@ -598,6 +721,262 @@ class LeanAiIngestor:
             for r in rows
         }
 
+    # ------------------------------------------------------------------
+    # Aux-stream polling (tool-executions, phase2, clarifications,
+    # diff-decisions, events) — all share since=<iso8601> pagination.
+    # ------------------------------------------------------------------
+
+    async def _poll_since_stream(
+        self,
+        *,
+        workspace_id: str,
+        backend_url: str,
+        repo_root: str,
+        export_key: str,
+        registered_by: str,
+        stream_key: str,
+        endpoint_path: str,
+        extra_params: dict[str, str],
+        dedup_fn,
+        result: IngestResult,
+    ) -> str | None:
+        """Paginate a ``since=<iso8601>`` stream and append to its dataset.
+
+        ``dedup_fn(row) -> key`` computes a dedup key per row. Rows whose
+        key is already present in the on-disk dataset are skipped so
+        re-polls after a ``since=`` cursor that clips at the start of a
+        second don't double-write. Returns the dataset name if any rows
+        were appended, else None.
+        """
+        dataset_name = _aux_dataset_name(workspace_id, stream_key)
+        await self._ensure_aux_dataset(
+            workspace_id=workspace_id,
+            stream_key=stream_key,
+            registered_by=registered_by,
+        )
+        seen_keys = await self._load_dedup_keys(dataset_name, dedup_fn)
+
+        cursor_row = await self._db.fetchone(
+            "SELECT last_cursor_since FROM lean_ai_stream_cursor "
+            "WHERE workspace_id = ? AND format = ?",
+            (workspace_id, stream_key),
+        )
+        since: str | None = cursor_row["last_cursor_since"] if cursor_row else None
+
+        page_limit = _stream_page_limit(stream_key, self._settings.ingestion.page_limit)
+        appended_total = 0
+        latest_seen = since
+
+        while True:
+            params: dict[str, Any] = dict(extra_params)
+            params["repo_root"] = repo_root
+            params["limit"] = page_limit
+            if since:
+                params["since"] = since
+
+            resp = await self._http.get(
+                f"{backend_url}{endpoint_path}",
+                params=params,
+                headers={"Authorization": f"Bearer {export_key}"},
+            )
+            if resp.status_code == 401:
+                raise IngestError("Export key rejected (401)")
+            if resp.status_code >= 400:
+                raise IngestError(
+                    f"{endpoint_path} failed ({resp.status_code}): "
+                    f"{resp.text[:200]}"
+                )
+            rows = _parse_jsonl_response(resp)
+            if not rows:
+                break
+
+            new_rows: list[dict] = []
+            for raw in rows:
+                created = raw.get("created_at")
+                if isinstance(created, str) and (
+                    latest_seen is None or created > latest_seen
+                ):
+                    latest_seen = created
+                key = dedup_fn(raw)
+                if key is None:
+                    # Rows without a dedup key still count — ambiguous rows
+                    # are rare and leaving them dedup-free means one extra
+                    # copy after a cursor clip, which is preferable to
+                    # dropping real data.
+                    new_rows.append({k: v for k, v in raw.items() if k != "id"})
+                    continue
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                new_rows.append({k: v for k, v in raw.items() if k != "id"})
+
+            if new_rows:
+                appended = await self._datasets.append_jsonl(dataset_name, new_rows)
+                appended_total += appended
+                result.rows_pulled += appended
+
+            if len(rows) < page_limit:
+                break
+            # Advance since-cursor so the next page doesn't resend the clip
+            # we just consumed. Producer uses ``created_at >= since`` so the
+            # cursor boundary is inclusive; dedup handles the re-sent row.
+            if latest_seen and latest_seen != since:
+                since = latest_seen
+            else:
+                # No forward progress — bail to avoid a tight loop.
+                break
+
+        # Persist cursor — use the pair_kind-less "dpo_tool_executions"
+        # case as an anchor: its "since" is the wall-clock of this poll
+        # because the producer's dpo_pairs stream doesn't echo created_at.
+        next_cursor = latest_seen
+        if stream_key == STREAM_DPO_TOOL_EXECUTIONS:
+            next_cursor = datetime.now(UTC).isoformat()
+        await self._save_since_cursor(workspace_id, stream_key, next_cursor)
+        return dataset_name if appended_total else None
+
+    async def _poll_memories_snapshot(
+        self,
+        *,
+        workspace_id: str,
+        backend_url: str,
+        repo_root: str,
+        export_key: str,
+        registered_by: str,
+        result: IngestResult,
+    ) -> str | None:
+        """Pull all curated memories and atomically replace the dataset.
+
+        ``/api/export/memories`` has no cursor — it's a snapshot endpoint.
+        We hash the payload and skip the replace if it's identical to the
+        last pulled snapshot, so idle polls are cheap even without a
+        server-side gate.
+        """
+        dataset_name = _aux_dataset_name(workspace_id, STREAM_MEMORIES)
+        await self._ensure_aux_dataset(
+            workspace_id=workspace_id,
+            stream_key=STREAM_MEMORIES,
+            registered_by=registered_by,
+        )
+
+        resp = await self._http.get(
+            f"{backend_url}/api/export/memories",
+            params={"repo_root": repo_root, "limit": 5000},
+            headers={"Authorization": f"Bearer {export_key}"},
+        )
+        if resp.status_code == 401:
+            raise IngestError("Export key rejected (401)")
+        if resp.status_code >= 400:
+            raise IngestError(
+                f"/api/export/memories failed ({resp.status_code}): "
+                f"{resp.text[:200]}"
+            )
+        rows = _parse_jsonl_response(resp)
+
+        # Hash the rendered body so we can skip an unchanged snapshot.
+        digest = hashlib.sha256(
+            "".join(
+                json.dumps(r, sort_keys=True, separators=(",", ":")) + "\n"
+                for r in rows
+            ).encode("utf-8")
+        ).hexdigest()
+
+        prev = await self._db.fetchone(
+            "SELECT last_snapshot_hash FROM lean_ai_stream_cursor "
+            "WHERE workspace_id = ? AND format = ?",
+            (workspace_id, STREAM_MEMORIES),
+        )
+        prev_hash = prev["last_snapshot_hash"] if prev else None
+        if prev_hash == digest:
+            return None
+
+        written = await self._datasets.replace_jsonl(dataset_name, rows)
+        result.rows_pulled += written
+        await self._save_snapshot_hash(workspace_id, STREAM_MEMORIES, digest)
+        # Only list as updated if the snapshot actually has rows — an
+        # empty-to-empty first poll shouldn't show up in datasets_updated.
+        return dataset_name if written else None
+
+    async def _save_since_cursor(
+        self, workspace_id: str, stream_key: str, since: str | None,
+    ) -> None:
+        await self._db.upsert(
+            lean_ai_stream_cursor_table,
+            values={
+                "workspace_id": workspace_id,
+                "format": stream_key,
+                "last_cursor": 0,
+                "last_cursor_since": since,
+                "updated_at": datetime.now(UTC).isoformat(),
+            },
+            conflict_columns=["workspace_id", "format"],
+            on_conflict="update",
+            update_columns=["last_cursor_since", "updated_at"],
+        )
+        await self._db.commit()
+
+    async def _save_snapshot_hash(
+        self, workspace_id: str, stream_key: str, digest: str,
+    ) -> None:
+        await self._db.upsert(
+            lean_ai_stream_cursor_table,
+            values={
+                "workspace_id": workspace_id,
+                "format": stream_key,
+                "last_cursor": 0,
+                "last_snapshot_hash": digest,
+                "updated_at": datetime.now(UTC).isoformat(),
+            },
+            conflict_columns=["workspace_id", "format"],
+            on_conflict="update",
+            update_columns=["last_snapshot_hash", "updated_at"],
+        )
+        await self._db.commit()
+
+    async def _ensure_aux_dataset(
+        self, *, workspace_id: str, stream_key: str, registered_by: str,
+    ) -> None:
+        name = _aux_dataset_name(workspace_id, stream_key)
+        existing = await self._datasets.get(name)
+        if existing is not None:
+            return
+        fmt = _AUX_DATASET_FORMAT[stream_key]
+        with contextlib.suppress(ValueError):
+            await self._datasets.create_empty_jsonl(
+                name=name,
+                fmt=fmt,
+                uploaded_by=registered_by,
+                source=f"lean_ai:{workspace_id}:{stream_key}",
+                description=(
+                    f"{fmt.value} rows auto-ingested from lean_ai "
+                    f"workspace {workspace_id} ({stream_key})"
+                ),
+            )
+
+    async def _load_dedup_keys(
+        self, dataset_name: str, dedup_fn,
+    ) -> set[str]:
+        path = await self._datasets.get_path(dataset_name)
+        if not path:
+            return set()
+        keys: set[str] = set()
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    k = dedup_fn(obj)
+                    if k is not None:
+                        keys.add(k)
+        except FileNotFoundError:
+            pass
+        return keys
+
     async def _ensure_pair_kind_state(
         self, *, workspace_id: str, pair_kind: str, registered_by: str,
     ) -> None:
@@ -707,45 +1086,68 @@ class LeanAiIngestor:
                 version_int, SUPPORTED_SCHEMA_VERSION,
             )
 
-    def _manifest_unchanged(self, workspace_row: Any, manifest: dict) -> bool:
-        """True iff DPO-relevant counts match the last snapshot exactly.
-
-        Returns False if the producer didn't report any of the relevant
-        count keys — fall back to a live pull rather than silently skip.
-        """
-        prev_raw = workspace_row["last_manifest_snapshot"]
-        if not prev_raw:
-            return False
+    def _load_prev_manifest(self, workspace_row: Any) -> dict | None:
+        """Return the previously-persisted manifest snapshot, or None."""
+        raw = workspace_row["last_manifest_snapshot"]
+        if not raw:
+            return None
         try:
-            prev = json.loads(prev_raw)
+            parsed = json.loads(raw)
         except json.JSONDecodeError:
-            return False
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    def _dpo_traces_changed(
+        self, prev: dict | None, manifest: dict,
+    ) -> bool:
+        """True if DPO-relevant counts differ from the prior snapshot.
+
+        A missing snapshot or absent integer counts defaults to True so the
+        first poll after upgrade actually runs.
+        """
+        if prev is None:
+            return True
         keys = ("plan_decisions", "validation_attempts", "total_traces")
         current = {k: manifest.get(k) for k in keys}
         previous = {k: prev.get(k) for k in keys}
-        # Require at least one explicit integer count on both sides.
         has_counts = any(isinstance(v, int) for v in current.values()) and any(
             isinstance(v, int) for v in previous.values()
         )
         if not has_counts:
-            return False
-        return current == previous
+            return True
+        return current != previous
+
+    def _aux_count_changed(
+        self, prev: dict | None, manifest: dict, stream_key: str,
+    ) -> bool:
+        """Gate for a single aux stream. Uses the stream's manifest count key."""
+        count_key = _AUX_MANIFEST_COUNT_KEY[stream_key]
+        current = _nested_get(manifest, count_key)
+        if prev is None or not isinstance(current, int):
+            return True
+        previous = _nested_get(prev, count_key)
+        if not isinstance(previous, int):
+            return True
+        return current != previous
 
     async def _persist_manifest(
         self, workspace_id: str, manifest: dict,
     ) -> None:
-        snapshot = json.dumps(
-            {
-                k: manifest.get(k)
-                for k in (
-                    "plan_decisions", "validation_attempts", "total_traces",
-                    "tool_executions", "clarifications", "phase2_syntheses",
-                    "diff_decisions", "workflow_events",
-                )
-                if manifest.get(k) is not None
-            },
-            separators=(",", ":"),
-        )
+        # Persist just the per-table counts we gate on — small, stable, and
+        # enough to drive the per-stream change-detection logic.
+        snapshot_body: dict[str, Any] = {
+            k: manifest.get(k)
+            for k in (
+                "plan_decisions", "validation_attempts", "total_traces",
+                "tool_executions", "clarifications", "phase2_syntheses",
+                "diff_decisions", "workflow_events",
+            )
+            if manifest.get(k) is not None
+        }
+        mem = manifest.get("memories")
+        if isinstance(mem, dict) and isinstance(mem.get("total"), int):
+            snapshot_body["memories"] = {"total": mem["total"]}
+        snapshot = json.dumps(snapshot_body, separators=(",", ":"))
         schema_version = manifest.get("schema_version")
         try:
             schema_int: int | None = int(schema_version) if schema_version is not None else None
@@ -848,6 +1250,80 @@ class LeanAiIngestor:
 
 def _dataset_name(workspace_id: str, pair_kind: str) -> str:
     return f"lean_ai:{workspace_id}:dpo:{pair_kind}"
+
+
+def _aux_dataset_name(workspace_id: str, stream_key: str) -> str:
+    return f"lean_ai:{workspace_id}:{_AUX_DATASET_SUFFIX[stream_key]}"
+
+
+def _nested_get(obj: dict, dotted_key: str) -> Any:
+    """Look up ``foo.bar`` in a nested dict — used for manifest['memories']['total']."""
+    parts = dotted_key.split(".")
+    cur: Any = obj
+    for p in parts:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(p)
+    return cur
+
+
+def _stream_page_limit(stream_key: str, default_limit: int) -> int:
+    """Respect per-endpoint server-side caps documented in the producer."""
+    caps: dict[str, int] = {
+        STREAM_SFT_PHASE2: 2000,      # /phase2-syntheses enforces max 2000
+        STREAM_SFT_CLARIFICATIONS: 5000,
+        STREAM_KTO_DIFF_DECISIONS: 10000,
+        STREAM_EVENTS: 10000,
+        STREAM_DPO_TOOL_EXECUTIONS: 10000,
+    }
+    cap = caps.get(stream_key, default_limit)
+    return max(1, min(default_limit, cap))
+
+
+# ---- dedup key functions per stream ----
+
+
+def _dedup_tool_pair(row: dict) -> str | None:
+    """(session_id, prompt_hint, chosen.arguments, rejected.arguments) — hashed."""
+    chosen = row.get("chosen") or {}
+    rejected = row.get("rejected") or {}
+    parts = [
+        str(row.get("session_id") or ""),
+        str(row.get("prompt_hint") or ""),
+        json.dumps(chosen.get("arguments"), sort_keys=True, default=str),
+        json.dumps(rejected.get("arguments"), sort_keys=True, default=str),
+    ]
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def _dedup_trace_uuid_required(row: dict) -> str | None:
+    trace_uuid = row.get("trace_uuid")
+    return str(trace_uuid) if trace_uuid else None
+
+
+def _dedup_clarification(row: dict) -> str | None:
+    if row.get("trace_uuid"):
+        return f"trace:{row['trace_uuid']}"
+    session = row.get("session_id") or ""
+    question = row.get("question") or ""
+    return f"sess:{session}|q:{hashlib.sha256(question.encode()).hexdigest()[:16]}"
+
+
+def _dedup_diff_decision(row: dict) -> str | None:
+    if row.get("diff_hash"):
+        return f"diff:{row['diff_hash']}"
+    if row.get("trace_uuid"):
+        return f"trace:{row['trace_uuid']}:{row.get('file_path') or ''}"
+    return None
+
+
+def _dedup_event(row: dict) -> str | None:
+    session = row.get("session_id") or ""
+    event_type = row.get("event_type") or ""
+    created = row.get("created_at") or ""
+    if not (event_type and created):
+        return None
+    return f"{session}|{event_type}|{created}"
 
 
 def _coerce_int(value: Any) -> int | None:
