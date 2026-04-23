@@ -189,6 +189,18 @@ class IngestResult(BaseModel):
     errors: list[str] = Field(default_factory=list)
 
 
+class PurgeResult(BaseModel):
+    """Summary returned by ``DELETE /workspaces/{id}/data``.
+
+    The workspace row + encrypted export key are left intact; only
+    ingested data and cursors are reset.
+    """
+
+    workspace_id: str
+    datasets_cleared: list[str] = Field(default_factory=list)
+    rows_purged: int
+
+
 class DiffDecisionForwardRequest(BaseModel):
     """Body for the coordinator's POST /diff-decision proxy.
 

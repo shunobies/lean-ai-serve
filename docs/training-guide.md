@@ -450,6 +450,18 @@ curl -X POST http://localhost:8420/api/training/workspaces/a1b2c3d4e5f6/diff-dec
 
 The coordinator injects the registered `repo_root` into the forwarded body. The row appears in the workspace's `diff_decisions` table and flows back into the next pull via the `:kto:diff_decisions` dataset.
 
+### Purging workspace data
+
+To wipe all ingested data for a workspace without un-registering it — for data rotation, or to honor a right-to-revoke request — issue a data-only delete:
+
+```bash
+curl -X DELETE http://localhost:8420/api/training/workspaces/a1b2c3d4e5f6/data \
+  -H "Authorization: Bearer las-..."
+# -> {"workspace_id": "a1b2c3d4e5f6", "datasets_cleared": [...], "rows_purged": 1423}
+```
+
+This truncates every dataset (main + `:eval` siblings), zeroes every stream cursor, and clears the manifest snapshot so the next scheduled poll re-pulls from the beginning. The workspace row, encrypted export key, display name, and `repo_root` survive — next poll just resumes with a clean slate. The operation acquires the background poller's lock so it can't interleave with an in-flight pull.
+
 ### Training on ingested data
 
 Ingested datasets appear in `GET /api/training/datasets` alongside any manually uploaded data. Submit a training job the same way you would for any other dataset:

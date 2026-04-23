@@ -30,6 +30,7 @@ from lean_ai_serve.training.schemas import (
     DatasetInfo,
     DiffDecisionForwardRequest,
     IngestResult,
+    PurgeResult,
     TrainingJobInfo,
     TrainingJobState,
     TrainingSubmitRequest,
@@ -457,6 +458,28 @@ async def delete_workspace(
             status_code=404, detail=f"Workspace not found: {workspace_id}"
         )
     return {"status": "deleted" if hard else "disabled"}
+
+
+@router.delete("/workspaces/{workspace_id}/data", response_model=PurgeResult)
+async def purge_workspace_data(
+    workspace_id: str,
+    request: Request,
+    user: AuthUser = Depends(require_permission("workspace:manage")),
+):
+    """Wipe ingested data for a workspace but keep the registration.
+
+    Truncates every dataset (main + ``:eval`` siblings), resets per-
+    pair_kind counters and stream cursors, and clears the manifest
+    snapshot so the next poll re-pulls from the beginning. The workspace
+    row, encrypted export key, display name, and repo_root are preserved.
+    """
+    ingestor = _get_ingestor(request)
+    result = await ingestor.purge_workspace_data(workspace_id)
+    if result is None:
+        raise HTTPException(
+            status_code=404, detail=f"Workspace not found: {workspace_id}"
+        )
+    return result
 
 
 @router.post("/workspaces/{workspace_id}/diff-decision")

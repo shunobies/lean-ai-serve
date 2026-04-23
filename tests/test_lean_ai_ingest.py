@@ -1234,3 +1234,202 @@ async def test_holdout_split_applies_to_aux_streams_too(db, settings, tmp_path):
     assert main.row_count > 0 and eval_ds.row_count > 0
 
     await http.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Purge — "wipe data, keep registration" (Deferred item 2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_purge_empties_datasets_but_preserves_registration(
+    ingestor, fake_lean_ai, db,
+):
+    """All ingested datasets empty; workspace row + encrypted key survive."""
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    for i in range(3):
+        fake_lean_ai.add_pair(pair_kind="plan_rejection", pair_id=f"p-{i}")
+    _add_aux_rows(fake_lean_ai)
+    await ingestor.poll_workspace("ws-abc")
+
+    # Snapshot the encrypted key before purge.
+    before = await db.fetchone(
+        "SELECT export_key_encrypted, display_name, repo_root "
+        "FROM lean_ai_workspaces WHERE workspace_id = ?",
+        ("ws-abc",),
+    )
+    assert before is not None
+    key_before = before["export_key_encrypted"]
+
+    result = await ingestor.purge_workspace_data("ws-abc")
+    assert result is not None
+    assert result.workspace_id == "ws-abc"
+    assert result.rows_purged >= 3
+
+    # Registration row still there, credentials untouched.
+    after = await db.fetchone(
+        "SELECT export_key_encrypted, display_name, repo_root, "
+        "       last_manifest_snapshot "
+        "FROM lean_ai_workspaces WHERE workspace_id = ?",
+        ("ws-abc",),
+    )
+    assert after is not None
+    assert after["export_key_encrypted"] == key_before
+    assert after["display_name"] == "x"
+    assert after["repo_root"] == "/tmp/ws-abc"
+    # Snapshot must be cleared so the next poll's manifest gate re-opens.
+    assert after["last_manifest_snapshot"] is None
+
+    # Every dataset that had data is now empty.
+    plan_ds = await ingestor._datasets.get(
+        _dataset_name("ws-abc", "plan_rejection")
+    )
+    assert plan_ds is not None
+    assert plan_ds.row_count == 0
+    for stream_key in (
+        STREAM_DPO_TOOL_EXECUTIONS, STREAM_SFT_PHASE2,
+        STREAM_SFT_CLARIFICATIONS, STREAM_KTO_DIFF_DECISIONS,
+        STREAM_EVENTS, STREAM_MEMORIES,
+    ):
+        ds = await ingestor._datasets.get(
+            _aux_dataset_name("ws-abc", stream_key)
+        )
+        assert ds is not None, stream_key
+        assert ds.row_count == 0, (stream_key, ds.row_count)
+
+
+@pytest.mark.asyncio
+async def test_purge_resets_cursors_so_next_poll_refetches(
+    ingestor, fake_lean_ai, db,
+):
+    """After purge, cursors are zero/null and the next poll pulls everything."""
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    fake_lean_ai.add_pair(pair_kind="plan_rejection", pair_id="p-1")
+    _add_aux_rows(fake_lean_ai)
+    await ingestor.poll_workspace("ws-abc")
+
+    await ingestor.purge_workspace_data("ws-abc")
+
+    # DPO traces cursor and every since-cursor should be reset.
+    stream_rows = await db.fetchall(
+        "SELECT format, last_cursor, last_cursor_since, last_snapshot_hash "
+        "FROM lean_ai_stream_cursor WHERE workspace_id = ?",
+        ("ws-abc",),
+    )
+    for row in stream_rows:
+        assert row["last_cursor"] == 0, row["format"]
+        assert row["last_cursor_since"] is None, row["format"]
+        assert row["last_snapshot_hash"] is None, row["format"]
+
+    # Per-pair_kind counters reset.
+    pair_rows = await db.fetchall(
+        "SELECT rows_imported, last_cursor FROM lean_ai_ingest_state "
+        "WHERE workspace_id = ?",
+        ("ws-abc",),
+    )
+    for row in pair_rows:
+        assert row["rows_imported"] == 0
+        assert row["last_cursor"] == 0
+
+    # Next poll should re-pull everything that's still on the fake producer.
+    result = await ingestor.poll_workspace("ws-abc")
+    assert result.rows_pulled >= 1  # at least the plan_rejection row
+
+
+@pytest.mark.asyncio
+async def test_purge_includes_eval_siblings_when_holdout_enabled(
+    db, settings, tmp_path,
+):
+    """Both main and :eval datasets get truncated."""
+    settings.ingestion.holdout_fraction = 0.3
+    settings.ingestion.holdout_salt = "purge-test"
+    fake = FakeLeanAi()
+    transport = httpx.ASGITransport(app=fake.app)
+    http = httpx.AsyncClient(transport=transport, base_url="http://fake")
+    dm = DatasetManager(db, settings)
+    ing = LeanAiIngestor(db, dm, settings, http_client=http)
+    await ing.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    for i in range(100):
+        fake.add_pair(pair_kind="plan_rejection", pair_id=f"p-{i}")
+    await ing.poll_workspace("ws-abc")
+
+    main_name = _dataset_name("ws-abc", "plan_rejection")
+    eval_name = main_name + ":eval"
+
+    main = await ing._datasets.get(main_name)
+    eval_ds = await ing._datasets.get(eval_name)
+    assert main is not None and eval_ds is not None
+    assert main.row_count + eval_ds.row_count == 100
+    assert eval_ds.row_count > 0  # sanity: holdout actually split rows
+
+    result = await ing.purge_workspace_data("ws-abc")
+    assert result is not None
+    assert main_name in result.datasets_cleared
+    assert eval_name in result.datasets_cleared
+    assert result.rows_purged == 100
+
+    main = await ing._datasets.get(main_name)
+    eval_ds = await ing._datasets.get(eval_name)
+    assert main is not None and eval_ds is not None
+    assert main.row_count == 0
+    assert eval_ds.row_count == 0
+
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_purge_returns_none_for_unknown_workspace(ingestor):
+    assert await ingestor.purge_workspace_data("nope") is None
+
+
+@pytest.mark.asyncio
+async def test_purge_handles_workspace_with_no_data(ingestor, fake_lean_ai):
+    """Purging an idle workspace is a no-op that still resets cursors cleanly."""
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    result = await ingestor.purge_workspace_data("ws-abc")
+    assert result is not None
+    assert result.rows_purged == 0
+    # Empty datasets shouldn't be listed — nothing to clear.
+    assert result.datasets_cleared == []
+
+
+@pytest.mark.asyncio
+async def test_purge_discovered_pair_kind_dataset_is_also_cleared(
+    ingestor, fake_lean_ai,
+):
+    """A pair_kind discovered at runtime must be cleared by purge too."""
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    fake_lean_ai.add_pair(pair_kind="tool_call_refinement", pair_id="t-1")
+    await ingestor.poll_workspace("ws-abc")
+
+    discovered = _dataset_name("ws-abc", "tool_call_refinement")
+    ds = await ingestor._datasets.get(discovered)
+    assert ds is not None and ds.row_count == 1
+
+    result = await ingestor.purge_workspace_data("ws-abc")
+    assert result is not None
+    assert discovered in result.datasets_cleared
+
+    ds = await ingestor._datasets.get(discovered)
+    assert ds is not None
+    assert ds.row_count == 0

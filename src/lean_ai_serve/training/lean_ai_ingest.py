@@ -32,6 +32,7 @@ from lean_ai_serve.training.schemas import (
     DatasetFormat,
     IngestResult,
     IngestState,
+    PurgeResult,
     WorkspaceInfo,
 )
 
@@ -380,6 +381,105 @@ class LeanAiIngestor:
             (workspace_id,),
         )
         await self._db.commit()
+        return True
+
+    async def purge_workspace_data(
+        self, workspace_id: str,
+    ) -> PurgeResult | None:
+        """Wipe ingested data for a workspace but keep the registration.
+
+        Third delete mode between soft-disable (which stops pulls but
+        preserves data) and hard-delete (which removes the workspace
+        entirely). Use for data rotation or a user's right-to-revoke
+        request: the workspace row, encrypted export key, display name,
+        and repo_root all survive, but every dataset file is truncated
+        and every cursor reset so the next poll re-pulls from scratch.
+
+        Returns None if the workspace doesn't exist (caller should 404).
+        Acquires the same poll lock the background scheduler uses, so
+        purges and in-flight polls can't interleave.
+        """
+        existing = await self._db.fetchone(
+            "SELECT workspace_id FROM lean_ai_workspaces WHERE workspace_id = ?",
+            (workspace_id,),
+        )
+        if existing is None:
+            return None
+
+        async with self._poll_lock:
+            result = PurgeResult(workspace_id=workspace_id, rows_purged=0)
+
+            # Collect every dataset that could hold this workspace's data.
+            # Per-pair_kind rows live in lean_ai_ingest_state (including any
+            # discovered pair_kinds from the fall-through rule); aux streams
+            # are named deterministically from _AUX_DATASET_SUFFIX.
+            pair_rows = await self._db.fetchall(
+                "SELECT dataset_name FROM lean_ai_ingest_state "
+                "WHERE workspace_id = ?",
+                (workspace_id,),
+            )
+            main_names = [r["dataset_name"] for r in pair_rows]
+            main_names.extend(
+                _aux_dataset_name(workspace_id, k) for k in _AUX_DATASET_SUFFIX
+            )
+
+            for name in main_names:
+                if await self._truncate_if_exists(name, result):
+                    result.datasets_cleared.append(name)
+                eval_name = _eval_dataset_name(name)
+                if await self._truncate_if_exists(eval_name, result):
+                    result.datasets_cleared.append(eval_name)
+
+            now = datetime.now(UTC).isoformat()
+            # Reset per-pair_kind counters and cursors.
+            await self._db.execute(
+                "UPDATE lean_ai_ingest_state "
+                "SET rows_imported = 0, last_cursor = 0, updated_at = ? "
+                "WHERE workspace_id = ?",
+                (now, workspace_id),
+            )
+            # Reset stream cursors (both id and since forms, plus the memories
+            # snapshot hash).
+            await self._db.execute(
+                "UPDATE lean_ai_stream_cursor "
+                "SET last_cursor = 0, last_cursor_since = NULL, "
+                "    last_snapshot_hash = NULL, updated_at = ? "
+                "WHERE workspace_id = ?",
+                (now, workspace_id),
+            )
+            # Drop the manifest snapshot so the next poll's gate doesn't
+            # short-circuit on pre-purge counts.
+            await self._db.execute(
+                "UPDATE lean_ai_workspaces "
+                "SET last_manifest_snapshot = NULL, last_error = NULL "
+                "WHERE workspace_id = ?",
+                (workspace_id,),
+            )
+            await self._db.commit()
+
+        logger.info(
+            "Purged %d rows across %d datasets for workspace %s",
+            result.rows_purged, len(result.datasets_cleared), workspace_id,
+        )
+        return result
+
+    async def _truncate_if_exists(
+        self, dataset_name: str, result: PurgeResult,
+    ) -> bool:
+        """Empty a dataset file in place if it exists and has rows.
+
+        Returns True iff rows were actually purged — so ``datasets_cleared``
+        only lists datasets whose content meaningfully changed. An already-
+        empty placeholder is left untouched (no mtime bump, not reported).
+        """
+        ds = await self._datasets.get(dataset_name)
+        if ds is None:
+            return False
+        count = ds.row_count or 0
+        if count == 0:
+            return False
+        result.rows_purged += count
+        await self._datasets.replace_jsonl(dataset_name, [])
         return True
 
     # ------------------------------------------------------------------
