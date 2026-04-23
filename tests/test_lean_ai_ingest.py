@@ -38,13 +38,26 @@ class FakeLeanAi:
 
     def __init__(
         self, *, api_key: str = "test-key", repo_root: str = "/tmp/ws-abc",
-        workspace_id: str = "ws-abc",
+        workspace_id: str = "ws-abc", schema_version: int = 1,
     ):
         self.api_key = api_key
         self.repo_root = repo_root
         self.workspace_id = workspace_id
+        self.schema_version = schema_version
         self._rows: list[dict] = []
+        # Every incoming request is recorded here so tests can assert on
+        # traffic patterns (single fetch, query params, etc.).
+        self.calls: list[dict] = []
         self.app = FastAPI()
+
+        @self.app.middleware("http")
+        async def record_call(request, call_next):
+            self.calls.append({
+                "path": request.url.path,
+                "query": dict(request.query_params),
+            })
+            return await call_next(request)
+
         self._register_routes()
 
     def _register_routes(self) -> None:
@@ -63,10 +76,21 @@ class FakeLeanAi:
         @self.app.get("/api/export/manifest")
         async def manifest(repo_root: str, authorization: str = Header("")):
             self._auth(authorization)
+            # Mirror the real producer's count fields so the ingestor's
+            # "skip when counts haven't moved" gate has something to read.
+            # plan_decisions and validation_attempts map to their pair_kind
+            # counts for a plausible approximation.
+            plan_decisions = sum(
+                1 for r in self._rows if r.get("pair_kind") == "plan_rejection"
+            )
+            validation_attempts = sum(
+                1 for r in self._rows if r.get("pair_kind") == "validation_fix"
+            )
             return {
-                "schema_version": 1,
-                "max_cursor": self._max_id(),
-                "rows": len(self._rows),
+                "schema_version": self.schema_version,
+                "total_traces": len(self._rows),
+                "plan_decisions": plan_decisions,
+                "validation_attempts": validation_attempts,
                 "workspace_id": self.workspace_id,
             }
 
@@ -531,19 +555,6 @@ async def test_register_requires_repo_root(ingestor):
 @pytest.mark.asyncio
 async def test_repo_root_sent_on_every_poll_request(ingestor, fake_lean_ai):
     """Every /api/export/* call must include ?repo_root= or the real backend 422s."""
-    seen: list[dict] = []
-
-    original = fake_lean_ai.app.router.routes
-
-    # Monkey-patch the fake to record each request's query params.
-    @fake_lean_ai.app.middleware("http")
-    async def record(request, call_next):
-        seen.append({
-            "path": request.url.path,
-            "repo_root": request.query_params.get("repo_root"),
-        })
-        return await call_next(request)
-
     await ingestor.register_workspace(
         workspace_id="ws-abc", display_name="x",
         backend_url="http://fake", repo_root="/tmp/ws-abc",
@@ -552,13 +563,13 @@ async def test_repo_root_sent_on_every_poll_request(ingestor, fake_lean_ai):
     fake_lean_ai.add_pair(pair_kind="plan_rejection", pair_id="p-1")
     await ingestor.poll_workspace("ws-abc")
 
-    assert all(entry["repo_root"] == "/tmp/ws-abc" for entry in seen), seen
-    # Make sure we actually covered both workspace-id + traces.
-    paths = {entry["path"] for entry in seen}
+    assert all(
+        c["query"].get("repo_root") == "/tmp/ws-abc" for c in fake_lean_ai.calls
+    ), fake_lean_ai.calls
+    paths = {c["path"] for c in fake_lean_ai.calls}
     assert "/api/export/workspace-id" in paths
     assert "/api/export/traces" in paths
-    # Ensure test leaves no unused-name warnings.
-    assert original is not None
+    assert "/api/export/manifest" in paths
 
 
 @pytest.mark.asyncio
@@ -572,6 +583,140 @@ async def test_workspace_info_exposes_repo_root(ingestor, fake_lean_ai):
     fetched = await ingestor.get_workspace("ws-abc")
     assert fetched is not None
     assert fetched.repo_root == "/tmp/ws-abc"
+
+
+# ---------------------------------------------------------------------------
+# Single-fetch multiplex + discovery (P1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_single_fetch_per_cycle_instead_of_one_per_pair_kind(
+    ingestor, fake_lean_ai
+):
+    """DPO pull must hit /traces once per cycle, not once per pair_kind."""
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    fake_lean_ai.add_pair(pair_kind="plan_rejection", pair_id="p-1")
+    fake_lean_ai.add_pair(pair_kind="validation_fix", pair_id="v-1")
+    fake_lean_ai.calls.clear()
+
+    await ingestor.poll_workspace("ws-abc")
+    traces_hits = [c for c in fake_lean_ai.calls if c["path"] == "/api/export/traces"]
+    # Page size defaults > 2, so a single page covers both rows — and we
+    # only visit /traces once regardless of how many pair_kinds appear.
+    assert len(traces_hits) == 1, fake_lean_ai.calls
+
+
+@pytest.mark.asyncio
+async def test_unknown_pair_kind_gets_its_own_dataset(ingestor, fake_lean_ai):
+    """New pair_kinds must be discovered and materialised, not silently dropped."""
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    fake_lean_ai.add_pair(pair_kind="tool_call_refinement", pair_id="t-1")
+
+    result = await ingestor.poll_workspace("ws-abc")
+    assert result.rows_pulled == 1
+    discovered_name = _dataset_name("ws-abc", "tool_call_refinement")
+    assert discovered_name in result.datasets_updated
+
+    ds = await ingestor._datasets.get(discovered_name)
+    assert ds is not None
+    assert ds.row_count == 1
+
+    info = await ingestor.get_workspace("ws-abc")
+    assert info is not None
+    kinds = {s.pair_kind for s in info.ingest}
+    assert "tool_call_refinement" in kinds
+
+
+@pytest.mark.asyncio
+async def test_manifest_gate_skips_poll_when_counts_unchanged(
+    ingestor, fake_lean_ai
+):
+    """Second poll with no new rows must not hit /traces at all."""
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    fake_lean_ai.add_pair(pair_kind="plan_rejection", pair_id="p-1")
+    await ingestor.poll_workspace("ws-abc")
+    fake_lean_ai.calls.clear()
+
+    result = await ingestor.poll_workspace("ws-abc")
+    assert result.rows_pulled == 0
+    traces_hits = [c for c in fake_lean_ai.calls if c["path"] == "/api/export/traces"]
+    assert traces_hits == [], "manifest gate should have short-circuited"
+
+
+@pytest.mark.asyncio
+async def test_manifest_gate_skips_only_when_counts_match(
+    ingestor, fake_lean_ai
+):
+    """Once a new row arrives, the gate must re-open and poll runs."""
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    fake_lean_ai.add_pair(pair_kind="plan_rejection", pair_id="p-1")
+    await ingestor.poll_workspace("ws-abc")
+
+    # New data.
+    fake_lean_ai.add_pair(pair_kind="plan_rejection", pair_id="p-2")
+    result = await ingestor.poll_workspace("ws-abc")
+    assert result.rows_pulled == 1
+
+
+@pytest.mark.asyncio
+async def test_schema_version_downgrade_is_rejected(db, settings, tmp_path):
+    """A producer older than this consumer supports must fail fast."""
+    fake = FakeLeanAi(schema_version=0)  # older than SUPPORTED_SCHEMA_VERSION=1
+    transport = httpx.ASGITransport(app=fake.app)
+    http = httpx.AsyncClient(transport=transport, base_url="http://fake")
+    dm = DatasetManager(db, settings)
+    ing = LeanAiIngestor(db, dm, settings, http_client=http)
+    await ing.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    result = await ing.poll_workspace("ws-abc")
+    assert result.rows_pulled == 0
+    assert any("schema_version" in e for e in result.errors)
+
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_schema_version_ahead_logs_warning_but_proceeds(
+    db, settings, tmp_path, caplog,
+):
+    """A newer producer must not block polling — log and keep going."""
+    fake = FakeLeanAi(schema_version=99)
+    fake.add_pair(pair_kind="plan_rejection", pair_id="p-1")
+    transport = httpx.ASGITransport(app=fake.app)
+    http = httpx.AsyncClient(transport=transport, base_url="http://fake")
+    dm = DatasetManager(db, settings)
+    ing = LeanAiIngestor(db, dm, settings, http_client=http)
+    await ing.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    with caplog.at_level("WARNING"):
+        result = await ing.poll_workspace("ws-abc")
+    assert result.rows_pulled == 1
+    assert any("schema_version=99" in r.message for r in caplog.records)
+
+    await http.aclose()
 
 
 @pytest.mark.asyncio

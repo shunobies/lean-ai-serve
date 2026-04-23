@@ -21,7 +21,11 @@ from typing import Any
 import httpx
 
 from lean_ai_serve.config import Settings
-from lean_ai_serve.db import Database, lean_ai_ingest_state_table
+from lean_ai_serve.db import (
+    Database,
+    lean_ai_ingest_state_table,
+    lean_ai_stream_cursor_table,
+)
 from lean_ai_serve.training.datasets import DatasetManager
 from lean_ai_serve.training.schemas import (
     DatasetFormat,
@@ -32,9 +36,20 @@ from lean_ai_serve.training.schemas import (
 
 logger = logging.getLogger(__name__)
 
-# Pair kinds emitted by lean_ai's DPO export. Each maps to a separate dataset
-# on the serve side so trainers can opt into one without the other.
-PAIR_KINDS: tuple[str, ...] = ("plan_rejection", "validation_fix")
+# Pair kinds emitted by lean_ai's DPO export. Seeded datasets/state rows are
+# pre-created at registration for these so operators see placeholders before
+# any data arrives. New pair_kinds discovered in the stream are added on
+# first sighting — per the protocol's "fall through on unknown values" rule
+# (see /home/alex/Code/lean_ai/docs/training-ingestion.md §6).
+KNOWN_PAIR_KINDS: tuple[str, ...] = ("plan_rejection", "validation_fix")
+
+# Public alias retained for callers that imported the original symbol.
+PAIR_KINDS = KNOWN_PAIR_KINDS
+
+# Maximum producer ``schema_version`` this consumer understands. The producer
+# does not emit schema_version today; when it starts, we error on a *lower*
+# value (downgrade = breaking removal by contract) and log on a higher one.
+SUPPORTED_SCHEMA_VERSION = 1
 
 
 class IngestError(Exception):
@@ -297,6 +312,10 @@ class LeanAiIngestor:
             (workspace_id,),
         )
         await self._db.execute(
+            "DELETE FROM lean_ai_stream_cursor WHERE workspace_id = ?",
+            (workspace_id,),
+        )
+        await self._db.execute(
             "DELETE FROM lean_ai_workspaces WHERE workspace_id = ?",
             (workspace_id,),
         )
@@ -308,7 +327,14 @@ class LeanAiIngestor:
     # ------------------------------------------------------------------
 
     async def poll_workspace(self, workspace_id: str) -> IngestResult:
-        """Pull any new DPO rows from a single workspace and append to datasets."""
+        """Pull any new DPO rows from a single workspace and append to datasets.
+
+        Does one paginated fetch of ``/traces?format=dpo`` and fans rows out
+        to their per-``pair_kind`` datasets, creating new datasets for
+        unknown pair_kinds (per protocol §6 "fall through on unknown"). Skips
+        the fetch entirely if ``/manifest`` shows no new DPO rows since the
+        previous poll — saves one round-trip per idle workspace × cycle.
+        """
         row = await self._db.fetchone(
             "SELECT * FROM lean_ai_workspaces WHERE workspace_id = ?",
             (workspace_id,),
@@ -328,19 +354,24 @@ class LeanAiIngestor:
         result = IngestResult(workspace_id=workspace_id, rows_pulled=0)
 
         try:
-            for pair_kind in PAIR_KINDS:
-                pulled = await self._poll_pair_kind(
-                    workspace_id=workspace_id,
-                    backend_url=backend_url,
-                    repo_root=repo_root,
-                    export_key=export_key,
-                    pair_kind=pair_kind,
-                    result=result,
-                )
-                if pulled:
-                    result.datasets_updated.append(
-                        _dataset_name(workspace_id, pair_kind)
-                    )
+            manifest = await self._fetch_manifest(backend_url, repo_root, export_key)
+            self._check_schema_version(manifest)
+            if self._manifest_unchanged(row, manifest):
+                await self._persist_manifest(workspace_id, manifest)
+                await self._record_poll_result(workspace_id, error=None)
+                return result
+
+            datasets_written = await self._poll_dpo_stream(
+                workspace_id=workspace_id,
+                backend_url=backend_url,
+                repo_root=repo_root,
+                export_key=export_key,
+                registered_by=row["registered_by"],
+                result=result,
+            )
+            result.datasets_updated.extend(sorted(datasets_written))
+
+            await self._persist_manifest(workspace_id, manifest)
         except IngestError as exc:
             result.errors.append(str(exc))
             await self._record_poll_result(workspace_id, error=str(exc))
@@ -380,34 +411,32 @@ class LeanAiIngestor:
             return await asyncio.gather(*(_one(r["workspace_id"]) for r in rows))
 
     # ------------------------------------------------------------------
-    # Internal: single pair_kind pull loop
+    # Internal: single-fetch DPO multiplex
     # ------------------------------------------------------------------
 
-    async def _poll_pair_kind(
+    async def _poll_dpo_stream(
         self,
         *,
         workspace_id: str,
         backend_url: str,
         repo_root: str,
         export_key: str,
-        pair_kind: str,
+        registered_by: str,
         result: IngestResult,
-    ) -> int:
-        state = await self._db.fetchone(
-            "SELECT last_cursor, rows_imported, dataset_name "
-            "FROM lean_ai_ingest_state "
-            "WHERE workspace_id = ? AND format = ? AND pair_kind = ?",
-            (workspace_id, DatasetFormat.DPO.value, pair_kind),
-        )
-        if state is None:
-            return 0
+    ) -> set[str]:
+        """Pull /traces?format=dpo once and route rows to the right dataset.
 
-        cursor: int = state["last_cursor"]
-        dataset_name: str = state["dataset_name"]
-        already_imported: set[str] = await self._load_pair_ids(dataset_name)
-
+        Advances a single per-(workspace_id, format) cursor in
+        ``lean_ai_stream_cursor`` regardless of how many pair_kinds the
+        stream contains. Per-pair_kind ``rows_imported`` totals are kept in
+        ``lean_ai_ingest_state`` so the UI can show per-kind progress.
+        """
+        fmt = DatasetFormat.DPO.value
+        cursor = await self._get_stream_cursor(workspace_id, fmt)
+        existing_state = await self._load_pair_kind_state(workspace_id, fmt)
+        dedup_cache: dict[str, set[str]] = {}
+        kinds_written: set[str] = set()
         page_limit = max(1, int(self._settings.ingestion.page_limit))
-        total_pulled = 0
 
         while True:
             rows = await self._fetch_page(
@@ -420,51 +449,179 @@ class LeanAiIngestor:
             if not rows:
                 break
 
-            new_rows: list[dict] = []
+            by_kind: dict[str, list[dict]] = {}
+            unknown_kinds: set[str] = set()
             max_id_in_page = cursor
+
             for raw in rows:
                 row_id = _coerce_int(raw.get("id"))
                 if row_id is not None and row_id > max_id_in_page:
                     max_id_in_page = row_id
 
-                if raw.get("pair_kind") != pair_kind:
+                pair_kind = raw.get("pair_kind")
+                if not pair_kind:
                     continue
+                if pair_kind not in existing_state:
+                    unknown_kinds.add(pair_kind)
+
                 pair_id = raw.get("pair_id")
-                if pair_id and pair_id in already_imported:
-                    continue
-                # Strip the envelope "id" (bookkeeping only) from the persisted row.
-                row_to_write = {k: v for k, v in raw.items() if k != "id"}
-                new_rows.append(row_to_write)
                 if pair_id:
-                    already_imported.add(pair_id)
+                    seen = dedup_cache.get(pair_kind)
+                    if seen is None:
+                        ds_name = existing_state.get(pair_kind, {}).get(
+                            "dataset_name"
+                        ) or _dataset_name(workspace_id, pair_kind)
+                        seen = await self._load_pair_ids(ds_name)
+                        dedup_cache[pair_kind] = seen
+                    if pair_id in seen:
+                        continue
+                    seen.add(pair_id)
 
-            if new_rows:
-                appended = await self._datasets.append_jsonl(dataset_name, new_rows)
-                total_pulled += appended
-                result.rows_pulled += appended
+                by_kind.setdefault(pair_kind, []).append(
+                    {k: v for k, v in raw.items() if k != "id"}
+                )
 
-            # Advance cursor to the max id seen (whether or not we kept each row).
+            # Create datasets / state rows for any newly-seen pair_kinds
+            # before writing so the append+bookkeeping step can assume they
+            # exist. Unknown kinds get a seeded dataset name matching the
+            # known-kind convention.
+            for pair_kind in unknown_kinds:
+                await self._ensure_pair_kind_state(
+                    workspace_id=workspace_id,
+                    pair_kind=pair_kind,
+                    registered_by=registered_by,
+                )
+                existing_state[pair_kind] = {
+                    "dataset_name": _dataset_name(workspace_id, pair_kind),
+                    "rows_imported": 0,
+                }
+                logger.info(
+                    "Discovered new pair_kind '%s' for workspace %s — created "
+                    "dataset and state row",
+                    pair_kind, workspace_id,
+                )
+
+            for pair_kind, new_rows in by_kind.items():
+                if not new_rows:
+                    continue
+                dataset_name = existing_state[pair_kind]["dataset_name"]
+                appended = await self._datasets.append_jsonl(
+                    dataset_name, new_rows,
+                )
+                if appended:
+                    existing_state[pair_kind]["rows_imported"] += appended
+                    result.rows_pulled += appended
+                    kinds_written.add(dataset_name)
+                    await self._db.execute(
+                        "UPDATE lean_ai_ingest_state "
+                        "SET rows_imported = ?, updated_at = ? "
+                        "WHERE workspace_id = ? AND format = ? AND pair_kind = ?",
+                        (
+                            existing_state[pair_kind]["rows_imported"],
+                            datetime.now(UTC).isoformat(),
+                            workspace_id,
+                            fmt,
+                            pair_kind,
+                        ),
+                    )
+
             if max_id_in_page > cursor:
                 cursor = max_id_in_page
+                await self._save_stream_cursor(workspace_id, fmt, cursor)
+                # Mirror the shared cursor onto each pair_kind state row so
+                # WorkspaceInfo.ingest[].last_cursor stays informative.
                 await self._db.execute(
                     "UPDATE lean_ai_ingest_state "
-                    "SET last_cursor = ?, rows_imported = ?, updated_at = ? "
-                    "WHERE workspace_id = ? AND format = ? AND pair_kind = ?",
-                    (
-                        cursor,
-                        state["rows_imported"] + total_pulled,
-                        datetime.now(UTC).isoformat(),
-                        workspace_id,
-                        DatasetFormat.DPO.value,
-                        pair_kind,
-                    ),
+                    "SET last_cursor = ? WHERE workspace_id = ? AND format = ?",
+                    (cursor, workspace_id, fmt),
                 )
                 await self._db.commit()
 
             if len(rows) < page_limit:
                 break
 
-        return total_pulled
+        return kinds_written
+
+    async def _get_stream_cursor(self, workspace_id: str, fmt: str) -> int:
+        row = await self._db.fetchone(
+            "SELECT last_cursor FROM lean_ai_stream_cursor "
+            "WHERE workspace_id = ? AND format = ?",
+            (workspace_id, fmt),
+        )
+        if row is not None:
+            return int(row["last_cursor"])
+        # Backfill from the max per-pair_kind cursor when migrating from the
+        # pre-P1 schema — keeps no-op polls after upgrade.
+        legacy = await self._db.fetchone(
+            "SELECT MAX(last_cursor) AS c FROM lean_ai_ingest_state "
+            "WHERE workspace_id = ? AND format = ?",
+            (workspace_id, fmt),
+        )
+        initial = int(legacy["c"] or 0) if legacy is not None else 0
+        await self._db.upsert(
+            lean_ai_stream_cursor_table,
+            values={
+                "workspace_id": workspace_id,
+                "format": fmt,
+                "last_cursor": initial,
+                "updated_at": datetime.now(UTC).isoformat(),
+            },
+            conflict_columns=["workspace_id", "format"],
+            on_conflict="ignore",
+        )
+        return initial
+
+    async def _save_stream_cursor(
+        self, workspace_id: str, fmt: str, cursor: int
+    ) -> None:
+        await self._db.execute(
+            "UPDATE lean_ai_stream_cursor "
+            "SET last_cursor = ?, updated_at = ? "
+            "WHERE workspace_id = ? AND format = ?",
+            (cursor, datetime.now(UTC).isoformat(), workspace_id, fmt),
+        )
+
+    async def _load_pair_kind_state(
+        self, workspace_id: str, fmt: str
+    ) -> dict[str, dict]:
+        rows = await self._db.fetchall(
+            "SELECT pair_kind, dataset_name, rows_imported "
+            "FROM lean_ai_ingest_state "
+            "WHERE workspace_id = ? AND format = ?",
+            (workspace_id, fmt),
+        )
+        return {
+            r["pair_kind"]: {
+                "dataset_name": r["dataset_name"],
+                "rows_imported": r["rows_imported"],
+            }
+            for r in rows
+        }
+
+    async def _ensure_pair_kind_state(
+        self, *, workspace_id: str, pair_kind: str, registered_by: str,
+    ) -> None:
+        dataset_name = _dataset_name(workspace_id, pair_kind)
+        await self._ensure_dataset(
+            name=dataset_name,
+            workspace_id=workspace_id,
+            pair_kind=pair_kind,
+            registered_by=registered_by,
+        )
+        await self._db.upsert(
+            lean_ai_ingest_state_table,
+            values={
+                "workspace_id": workspace_id,
+                "format": DatasetFormat.DPO.value,
+                "pair_kind": pair_kind,
+                "last_cursor": 0,
+                "rows_imported": 0,
+                "dataset_name": dataset_name,
+                "updated_at": datetime.now(UTC).isoformat(),
+            },
+            conflict_columns=["workspace_id", "format", "pair_kind"],
+            on_conflict="ignore",
+        )
 
     async def _load_pair_ids(self, dataset_name: str) -> set[str]:
         """Read existing pair_ids from the dataset file so we can dedup."""
@@ -492,6 +649,115 @@ class LeanAiIngestor:
     # ------------------------------------------------------------------
     # Internal: HTTP
     # ------------------------------------------------------------------
+
+    async def _fetch_manifest(
+        self, backend_url: str, repo_root: str, export_key: str,
+    ) -> dict:
+        """Pull /api/export/manifest for gating + schema-version checks."""
+        try:
+            resp = await self._http.get(
+                f"{backend_url}/api/export/manifest",
+                params={"repo_root": repo_root},
+                headers={"Authorization": f"Bearer {export_key}"},
+            )
+        except httpx.HTTPError as exc:
+            raise IngestError(
+                f"Cannot reach {backend_url}/api/export/manifest: {exc!r}"
+            ) from exc
+        if resp.status_code == 401:
+            raise IngestError("Export key rejected (401)")
+        if resp.status_code >= 400:
+            raise IngestError(
+                f"Manifest fetch failed ({resp.status_code}): {resp.text[:200]}"
+            )
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise IngestError(
+                f"Manifest returned non-JSON: {resp.text[:200]}"
+            ) from exc
+        if not isinstance(body, dict):
+            raise IngestError("Manifest body must be a JSON object")
+        return body
+
+    def _check_schema_version(self, manifest: dict) -> None:
+        """Warn on ahead-of-consumer schema; error on a known-breaking downgrade."""
+        version = manifest.get("schema_version")
+        if version is None:
+            # Producer does not emit schema_version yet — treat as v1.
+            return
+        try:
+            version_int = int(version)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Manifest schema_version is not an integer: %r", version
+            )
+            return
+        if version_int < SUPPORTED_SCHEMA_VERSION:
+            raise IngestError(
+                f"Producer schema_version={version_int} is older than this "
+                f"consumer supports (min={SUPPORTED_SCHEMA_VERSION}) — "
+                "either upgrade the producer or pin an older lean_ai_serve."
+            )
+        if version_int > SUPPORTED_SCHEMA_VERSION:
+            logger.warning(
+                "Producer schema_version=%d is newer than this consumer "
+                "understands (%d) — unknown fields will be preserved on raw "
+                "exports but new columns will be ignored until upgrade.",
+                version_int, SUPPORTED_SCHEMA_VERSION,
+            )
+
+    def _manifest_unchanged(self, workspace_row: Any, manifest: dict) -> bool:
+        """True iff DPO-relevant counts match the last snapshot exactly.
+
+        Returns False if the producer didn't report any of the relevant
+        count keys — fall back to a live pull rather than silently skip.
+        """
+        prev_raw = workspace_row["last_manifest_snapshot"]
+        if not prev_raw:
+            return False
+        try:
+            prev = json.loads(prev_raw)
+        except json.JSONDecodeError:
+            return False
+        keys = ("plan_decisions", "validation_attempts", "total_traces")
+        current = {k: manifest.get(k) for k in keys}
+        previous = {k: prev.get(k) for k in keys}
+        # Require at least one explicit integer count on both sides.
+        has_counts = any(isinstance(v, int) for v in current.values()) and any(
+            isinstance(v, int) for v in previous.values()
+        )
+        if not has_counts:
+            return False
+        return current == previous
+
+    async def _persist_manifest(
+        self, workspace_id: str, manifest: dict,
+    ) -> None:
+        snapshot = json.dumps(
+            {
+                k: manifest.get(k)
+                for k in (
+                    "plan_decisions", "validation_attempts", "total_traces",
+                    "tool_executions", "clarifications", "phase2_syntheses",
+                    "diff_decisions", "workflow_events",
+                )
+                if manifest.get(k) is not None
+            },
+            separators=(",", ":"),
+        )
+        schema_version = manifest.get("schema_version")
+        try:
+            schema_int: int | None = int(schema_version) if schema_version is not None else None
+        except (TypeError, ValueError):
+            schema_int = None
+        await self._db.execute(
+            "UPDATE lean_ai_workspaces "
+            "SET last_manifest_snapshot = ?, last_schema_version = ? "
+            "WHERE workspace_id = ?",
+            (snapshot, schema_int, workspace_id),
+        )
+        await self._db.commit()
 
     async def _verify_workspace_id(
         self,

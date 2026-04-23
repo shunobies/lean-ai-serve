@@ -168,6 +168,28 @@ lean_ai_workspaces_table = sa.Table(
     sa.Column("enabled", sa.Integer, nullable=False, server_default="1"),
     sa.Column("last_polled_at", sa.String(64)),
     sa.Column("last_error", sa.Text),
+    # JSON snapshot of the last /api/export/manifest response; used to skip
+    # polling when counts haven't moved since the previous cycle.
+    sa.Column("last_manifest_snapshot", sa.Text),
+    # producer schema_version from the last manifest (null if not emitted)
+    sa.Column("last_schema_version", sa.Integer),
+)
+
+# One row per ``(workspace_id, format)`` — tracks the high-water-mark cursor
+# for a single /api/export/traces stream. The per-pair_kind state table still
+# records the ``dataset_name`` and ``rows_imported`` for each sub-stream, but
+# the cursor itself lives here so the consumer can fetch once and fan out
+# rows to each dataset by ``pair_kind``.
+lean_ai_stream_cursor_table = sa.Table(
+    "lean_ai_stream_cursor",
+    metadata,
+    sa.Column("workspace_id", sa.String(64), nullable=False),
+    sa.Column("format", sa.String(16), nullable=False),
+    sa.Column("last_cursor", sa.Integer, nullable=False, server_default="0"),
+    sa.Column("updated_at", sa.String(64), nullable=False),
+    sa.PrimaryKeyConstraint(
+        "workspace_id", "format", name="pk_lean_ai_stream_cursor"
+    ),
 )
 
 # Incremental ingestion state — one row per (workspace_id, format, pair_kind).
@@ -337,6 +359,8 @@ class Database:
         inspector = sa.inspect(conn)
         additions: list[tuple[str, str, str]] = [
             ("lean_ai_workspaces", "repo_root", "VARCHAR(1024)"),
+            ("lean_ai_workspaces", "last_manifest_snapshot", "TEXT"),
+            ("lean_ai_workspaces", "last_schema_version", "INTEGER"),
         ]
         for table_name, column_name, sql_type in additions:
             if not inspector.has_table(table_name):
