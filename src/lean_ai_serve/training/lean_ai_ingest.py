@@ -360,10 +360,13 @@ class LeanAiIngestor:
         )
         for s in state_rows:
             await self._datasets.delete(s["dataset_name"])
+            await self._datasets.delete(_eval_dataset_name(s["dataset_name"]))
         # Aux-stream datasets (memories, events, phase2, clarifications,
         # diff-decisions, tool-call DPO) — delete even if ingest never wrote.
         for stream_key in _AUX_DATASET_SUFFIX:
-            await self._datasets.delete(_aux_dataset_name(workspace_id, stream_key))
+            main = _aux_dataset_name(workspace_id, stream_key)
+            await self._datasets.delete(main)
+            await self._datasets.delete(_eval_dataset_name(main))
         await self._db.execute(
             "DELETE FROM lean_ai_ingest_state WHERE workspace_id = ?",
             (workspace_id,),
@@ -508,6 +511,68 @@ class LeanAiIngestor:
         await self._record_poll_result(workspace_id, error=None)
         return result
 
+    async def forward_diff_decision(
+        self,
+        workspace_id: str,
+        *,
+        session_id: str,
+        file_path: str,
+        accepted: bool,
+        diff_hash: str | None = None,
+        note: str | None = None,
+        trace_uuid: str | None = None,
+    ) -> dict:
+        """POST a user accept/reject to the workspace's /api/diffs/decision.
+
+        The coordinator can act as a single ingress for extensions that
+        don't know (or shouldn't know) the individual workspace URLs.
+        The producer's endpoint takes ``repo_root`` in the body and does
+        not require auth — we supply the registered repo_root.
+        """
+        row = await self._db.fetchone(
+            "SELECT backend_url, repo_root, enabled FROM lean_ai_workspaces "
+            "WHERE workspace_id = ?",
+            (workspace_id,),
+        )
+        if row is None:
+            raise IngestError(f"Unknown workspace: {workspace_id}")
+        if not row["enabled"]:
+            raise IngestError(f"Workspace disabled: {workspace_id}")
+        if not row["repo_root"]:
+            raise IngestError(
+                f"Workspace {workspace_id} is missing repo_root — re-register it"
+            )
+
+        body = {
+            "repo_root": row["repo_root"],
+            "session_id": session_id,
+            "file_path": file_path,
+            "accepted": accepted,
+        }
+        if diff_hash is not None:
+            body["diff_hash"] = diff_hash
+        if note is not None:
+            body["note"] = note
+        if trace_uuid is not None:
+            body["trace_uuid"] = trace_uuid
+
+        try:
+            resp = await self._http.post(
+                f"{row['backend_url']}/api/diffs/decision", json=body,
+            )
+        except httpx.HTTPError as exc:
+            raise IngestError(
+                f"Cannot reach {row['backend_url']}/api/diffs/decision: {exc!r}"
+            ) from exc
+        if resp.status_code >= 400:
+            raise IngestError(
+                f"Forward failed ({resp.status_code}): {resp.text[:200]}"
+            )
+        try:
+            return resp.json()
+        except ValueError:
+            return {"stored": True}
+
     async def poll_all(self) -> list[IngestResult]:
         """Poll every enabled workspace, bounded by ``max_concurrent_pulls``."""
         async with self._poll_lock:
@@ -628,8 +693,12 @@ class LeanAiIngestor:
                 if not new_rows:
                     continue
                 dataset_name = existing_state[pair_kind]["dataset_name"]
-                appended = await self._datasets.append_jsonl(
-                    dataset_name, new_rows,
+                appended = await self._append_with_holdout(
+                    workspace_id,
+                    dataset_name,
+                    new_rows,
+                    _dedup_pair_id,
+                    registered_by=registered_by,
                 )
                 if appended:
                     existing_state[pair_kind]["rows_imported"] += appended
@@ -811,7 +880,13 @@ class LeanAiIngestor:
                 new_rows.append({k: v for k, v in raw.items() if k != "id"})
 
             if new_rows:
-                appended = await self._datasets.append_jsonl(dataset_name, new_rows)
+                appended = await self._append_with_holdout(
+                    workspace_id,
+                    dataset_name,
+                    new_rows,
+                    dedup_fn,
+                    registered_by=registered_by,
+                )
                 appended_total += appended
                 result.rows_pulled += appended
 
@@ -890,7 +965,13 @@ class LeanAiIngestor:
         if prev_hash == digest:
             return None
 
-        written = await self._datasets.replace_jsonl(dataset_name, rows)
+        written = await self._replace_with_holdout(
+            workspace_id,
+            dataset_name,
+            rows,
+            _dedup_memory,
+            registered_by=registered_by,
+        )
         result.rows_pulled += written
         await self._save_snapshot_hash(workspace_id, STREAM_MEMORIES, digest)
         # Only list as updated if the snapshot actually has rows — an
@@ -932,6 +1013,125 @@ class LeanAiIngestor:
             update_columns=["last_snapshot_hash", "updated_at"],
         )
         await self._db.commit()
+
+    async def _append_with_holdout(
+        self,
+        workspace_id: str,
+        dataset_name: str,
+        rows: list[dict],
+        dedup_fn,
+        *,
+        registered_by: str,
+    ) -> int:
+        """Append rows, routing a deterministic fraction to the :eval sibling.
+
+        Returns the total number of rows appended (train + eval). When
+        ``holdout_fraction`` is 0, behaves identically to
+        ``_datasets.append_jsonl`` on the main dataset.
+        """
+        fraction = self._holdout_fraction()
+        if fraction <= 0.0 or not rows:
+            return await self._datasets.append_jsonl(dataset_name, rows)
+
+        train_rows: list[dict] = []
+        eval_rows: list[dict] = []
+        for row in rows:
+            key = dedup_fn(row) if dedup_fn else None
+            if self._row_in_holdout(workspace_id, dataset_name, key, row, fraction):
+                eval_rows.append(row)
+            else:
+                train_rows.append(row)
+
+        total = 0
+        if train_rows:
+            total += await self._datasets.append_jsonl(dataset_name, train_rows)
+        if eval_rows:
+            eval_name = _eval_dataset_name(dataset_name)
+            await self._ensure_eval_dataset(
+                main_name=dataset_name,
+                eval_name=eval_name,
+                registered_by=registered_by,
+            )
+            total += await self._datasets.append_jsonl(eval_name, eval_rows)
+        return total
+
+    async def _replace_with_holdout(
+        self,
+        workspace_id: str,
+        dataset_name: str,
+        rows: list[dict],
+        dedup_fn,
+        *,
+        registered_by: str,
+    ) -> int:
+        """Snapshot-replace variant used by memories. Splits atomically."""
+        fraction = self._holdout_fraction()
+        if fraction <= 0.0:
+            return await self._datasets.replace_jsonl(dataset_name, rows)
+
+        train_rows: list[dict] = []
+        eval_rows: list[dict] = []
+        for row in rows:
+            key = dedup_fn(row) if dedup_fn else None
+            if self._row_in_holdout(workspace_id, dataset_name, key, row, fraction):
+                eval_rows.append(row)
+            else:
+                train_rows.append(row)
+
+        total = await self._datasets.replace_jsonl(dataset_name, train_rows)
+        eval_name = _eval_dataset_name(dataset_name)
+        await self._ensure_eval_dataset(
+            main_name=dataset_name,
+            eval_name=eval_name,
+            registered_by=registered_by,
+        )
+        total += await self._datasets.replace_jsonl(eval_name, eval_rows)
+        return total
+
+    def _holdout_fraction(self) -> float:
+        raw = float(self._settings.ingestion.holdout_fraction or 0.0)
+        # Clamp to [0.0, 0.5] — more than half the data going to eval means
+        # the coordinator is the wrong place for the split.
+        return max(0.0, min(0.5, raw))
+
+    def _row_in_holdout(
+        self,
+        workspace_id: str,
+        dataset_name: str,
+        dedup_key: str | None,
+        row: dict,
+        fraction: float,
+    ) -> bool:
+        salt = self._settings.ingestion.holdout_salt or ""
+        # A stable bucketing identity: workspace + row identity. If the row
+        # has no dedup key (rare), fall back to a sorted-json digest so the
+        # decision is at least content-stable.
+        identity = dedup_key or json.dumps(row, sort_keys=True, default=str)
+        digest = hashlib.sha256(
+            f"{salt}|{workspace_id}|{dataset_name}|{identity}".encode("utf-8")
+        ).digest()
+        # Take 8 bytes as an integer, map to [0.0, 1.0).
+        bucket = int.from_bytes(digest[:8], "big") / float(1 << 64)
+        return bucket < fraction
+
+    async def _ensure_eval_dataset(
+        self, *, main_name: str, eval_name: str, registered_by: str,
+    ) -> None:
+        existing = await self._datasets.get(eval_name)
+        if existing is not None:
+            return
+        main = await self._datasets.get(main_name)
+        fmt = main.format if main else DatasetFormat.JSONL
+        with contextlib.suppress(ValueError):
+            await self._datasets.create_empty_jsonl(
+                name=eval_name,
+                fmt=fmt,
+                uploaded_by=registered_by,
+                source=f"holdout-of:{main_name}",
+                description=(
+                    f"Eval holdout rows (deterministic) for {main_name}"
+                ),
+            )
 
     async def _ensure_aux_dataset(
         self, *, workspace_id: str, stream_key: str, registered_by: str,
@@ -1256,6 +1456,11 @@ def _aux_dataset_name(workspace_id: str, stream_key: str) -> str:
     return f"lean_ai:{workspace_id}:{_AUX_DATASET_SUFFIX[stream_key]}"
 
 
+def _eval_dataset_name(main_name: str) -> str:
+    """Sibling dataset name used by the holdout split."""
+    return f"{main_name}:eval"
+
+
 def _nested_get(obj: dict, dotted_key: str) -> Any:
     """Look up ``foo.bar`` in a nested dict — used for manifest['memories']['total']."""
     parts = dotted_key.split(".")
@@ -1281,6 +1486,21 @@ def _stream_page_limit(stream_key: str, default_limit: int) -> int:
 
 
 # ---- dedup key functions per stream ----
+
+
+def _dedup_pair_id(row: dict) -> str | None:
+    """DPO traces stream: pair_id is the stable identity."""
+    pid = row.get("pair_id")
+    return str(pid) if pid else None
+
+
+def _dedup_memory(row: dict) -> str | None:
+    """Memories have no globally-stable id — bucket on (category, content)."""
+    parts = [
+        str(row.get("category") or ""),
+        str(row.get("content") or ""),
+    ]
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
 def _dedup_tool_pair(row: dict) -> str | None:

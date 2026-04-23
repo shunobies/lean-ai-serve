@@ -163,6 +163,12 @@ ingestion:
   max_concurrent_pulls: 4              # Parallel workspace polls per cycle
   page_limit: 500                      # Rows per /api/export/traces page
   http_timeout_seconds: 30             # Per-request timeout to remote lean_ai
+  # Deterministic per-workspace eval holdout. Rows are split on append
+  # using sha256(salt | workspace_id | dataset | row_key). Set to e.g.
+  # 0.1 to reserve 10% of each stream in a sibling ``<name>:eval`` dataset.
+  # Leave at 0.0 (default) to disable the split.
+  holdout_fraction: 0.0                # Between 0.0 and 0.5
+  holdout_salt: ""                     # Any stable string; empty is fine
 
 # --- Observability ---
 # All features are independently toggleable.

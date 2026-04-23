@@ -344,14 +344,22 @@ flowchart LR
 
 ### Concepts
 
-Each registered workspace produces **two** datasets on lean-ai-serve:
+Each registered workspace produces **eight** datasets on lean-ai-serve, one per lean-ai export stream:
 
-| Dataset name | Contents |
-|--------------|----------|
-| `lean_ai:<workspace_id>:dpo:plan_rejection` | DPO pairs for the planning phase |
-| `lean_ai:<workspace_id>:dpo:validation_fix` | DPO pairs for the fix loop |
+| Dataset name | Format | Source endpoint |
+|---|---|---|
+| `lean_ai:<workspace_id>:dpo:plan_rejection` | DPO | `/traces?format=dpo` |
+| `lean_ai:<workspace_id>:dpo:validation_fix` | DPO | `/traces?format=dpo` |
+| `lean_ai:<workspace_id>:dpo:tool_calls` | DPO | `/tool-executions?format=dpo_pairs` |
+| `lean_ai:<workspace_id>:sft:phase2` | JSONL | `/phase2-syntheses` |
+| `lean_ai:<workspace_id>:sft:clarifications` | JSONL | `/clarifications` |
+| `lean_ai:<workspace_id>:kto:diff_decisions` | JSONL | `/diff-decisions` |
+| `lean_ai:<workspace_id>:events` | JSONL | `/events` |
+| `lean_ai:<workspace_id>:memories` | JSONL | `/memories` (snapshot/replace) |
 
-Both use the new `dpo` format (JSONL with `prompt` / `chosen` / `rejected` / `pair_id` / `pair_kind` per line), which LLaMA-Factory consumes natively. Rows accumulate append-only — the server tracks a `last_cursor` per `(workspace_id, pair_kind)` and dedupes by `pair_id` so re-polling is always idempotent.
+Discovery-driven: any new `pair_kind` lean-ai emits automatically gets its own `lean_ai:<workspace_id>:dpo:<kind>` dataset on first sighting. Append-only streams dedupe per-row using a stream-specific identity (pair_id, trace_uuid, diff_hash, etc.) so re-polls are idempotent. The memories dataset is atomically replaced when its payload hash changes and untouched otherwise.
+
+If `ingestion.holdout_fraction > 0` a sibling `<name>:eval` dataset is created alongside each main dataset and receives a deterministic fraction of the rows (hashed on `(salt, workspace_id, dataset, row_key)`), so each workspace has a pristine hold-out evaluation set that the trainer never sees.
 
 ### Prerequisites
 
@@ -396,11 +404,12 @@ curl -X POST http://localhost:8420/api/training/workspaces \
     "workspace_id": "a1b2c3d4e5f6",
     "display_name": "alice-workstation",
     "backend_url": "http://workstation.local:8422",
+    "repo_root": "/home/alice/Code/lean_ai",
     "export_key": "las-export-..."
   }'
 ```
 
-The server probes `GET /api/export/manifest` with the supplied key before saving, so a bad key or unreachable URL fails fast with `400` at registration time. On success, two empty DPO datasets are created and one `lean_ai_ingest_state` row per `pair_kind` is seeded with `last_cursor=0`.
+`repo_root` is the absolute path on the workspace host that lean-ai uses to identify its database — lean-ai's export endpoints require it on every request. At registration the coordinator calls `GET /api/export/workspace-id?repo_root=<path>` and rejects the registration if the returned id doesn't match `workspace_id`, so a typo or wrong salt fails fast with `400`. On success, all per-workspace datasets are created empty and ready to receive rows on the next poll.
 
 Export keys are encrypted at rest via AES-256-GCM when `encryption.at_rest` is enabled (same master key used for the audit log).
 
@@ -420,6 +429,26 @@ Manual kick-off for a single workspace (e.g. right after registration):
 curl -X POST http://localhost:8420/api/training/workspaces/a1b2c3d4e5f6/poll \
   -H "Authorization: Bearer las-..."
 ```
+
+### Forwarding diff decisions
+
+Extensions that only know the coordinator URL can record a user accept/reject via the coordinator, which forwards it to the correct lean-ai workspace:
+
+```bash
+curl -X POST http://localhost:8420/api/training/workspaces/a1b2c3d4e5f6/diff-decision \
+  -H "Authorization: Bearer las-..." \
+  -H "Content-Type: application/json" \
+  -d '{
+    "session_id": "s1",
+    "file_path": "src/foo.py",
+    "accepted": false,
+    "diff_hash": "abc123...",
+    "note": "introduces regression",
+    "trace_uuid": "uuid-..."
+  }'
+```
+
+The coordinator injects the registered `repo_root` into the forwarded body. The row appears in the workspace's `diff_decisions` table and flows back into the next pull via the `:kto:diff_decisions` dataset.
 
 ### Training on ingested data
 

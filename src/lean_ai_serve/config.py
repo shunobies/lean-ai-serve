@@ -196,6 +196,11 @@ class IngestionConfig(BaseModel):
     max_concurrent_pulls: int = 4
     page_limit: int = 500
     http_timeout_seconds: float = 30.0
+    # Fraction of incoming rows to divert into a sibling :eval dataset for
+    # held-out evaluation. Must be in [0.0, 0.5]. 0.0 disables the split.
+    # Bucketing is deterministic per (workspace_id, row dedup key + salt).
+    holdout_fraction: float = 0.0
+    holdout_salt: str = ""  # empty string is fine — deterministic across restarts
 
 
 class ContextCompressionConfig(BaseModel):

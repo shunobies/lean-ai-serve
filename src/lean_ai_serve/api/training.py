@@ -28,6 +28,7 @@ from lean_ai_serve.training.schemas import (
     AdapterState,
     DatasetFormat,
     DatasetInfo,
+    DiffDecisionForwardRequest,
     IngestResult,
     TrainingJobInfo,
     TrainingJobState,
@@ -456,3 +457,32 @@ async def delete_workspace(
             status_code=404, detail=f"Workspace not found: {workspace_id}"
         )
     return {"status": "deleted" if hard else "disabled"}
+
+
+@router.post("/workspaces/{workspace_id}/diff-decision")
+async def forward_diff_decision(
+    workspace_id: str,
+    body: DiffDecisionForwardRequest,
+    request: Request,
+    user: AuthUser = Depends(require_permission("workspace:manage")),
+):
+    """Forward a diff accept/reject to the workspace's /api/diffs/decision.
+
+    Lets extensions that only know the coordinator URL record preferences
+    without needing direct access to individual workspaces. The coordinator
+    injects the workspace's registered ``repo_root`` into the forwarded
+    body.
+    """
+    ingestor = _get_ingestor(request)
+    try:
+        return await ingestor.forward_diff_decision(
+            workspace_id,
+            session_id=body.session_id,
+            file_path=body.file_path,
+            accepted=body.accepted,
+            diff_hash=body.diff_hash,
+            note=body.note,
+            trace_uuid=body.trace_uuid,
+        )
+    except IngestError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e

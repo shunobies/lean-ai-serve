@@ -187,3 +187,19 @@ class IngestResult(BaseModel):
     rows_pulled: int
     datasets_updated: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
+
+
+class DiffDecisionForwardRequest(BaseModel):
+    """Body for the coordinator's POST /diff-decision proxy.
+
+    Extensions that only know the coordinator URL send this shape and the
+    coordinator forwards it to the workspace's own POST /api/diffs/decision
+    (the producer endpoint takes ``repo_root`` in the body, no auth header).
+    """
+
+    session_id: str
+    file_path: str
+    accepted: bool
+    diff_hash: str | None = None
+    note: str | None = None
+    trace_uuid: str | None = None

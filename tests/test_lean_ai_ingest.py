@@ -59,6 +59,7 @@ class FakeLeanAi:
         self.diff_decisions: list[dict] = []
         self.events: list[dict] = []
         self.memories: list[dict] = []
+        self.received_diff_decisions: list[dict] = []
         # Every incoming request is recorded here so tests can assert on
         # traffic patterns (single fetch, query params, etc.).
         self.calls: list[dict] = []
@@ -195,6 +196,16 @@ class FakeLeanAi:
             if since:
                 src = [r for r in src if r.get("created_at", "") >= since]
             return self._jsonl(src[:limit])
+
+        @self.app.post("/api/diffs/decision")
+        async def post_diff_decision(body: dict):
+            # Mirror the producer — no auth on this endpoint; body carries
+            # ``repo_root`` directly. Record the received body for test
+            # assertions.
+            if body.get("repo_root") != self.repo_root:
+                raise HTTPException(status_code=404, detail="unknown repo_root")
+            self.received_diff_decisions.append(body)
+            return {"stored": True, "id": len(self.received_diff_decisions)}
 
         @self.app.get("/api/export/memories")
         async def memories_endpoint(
@@ -1058,3 +1069,168 @@ async def test_delete_hard_removes_all_aux_datasets(ingestor, fake_lean_ai):
         assert await ingestor._datasets.get(
             _aux_dataset_name("ws-abc", stream_key)
         ) is None, stream_key
+
+
+# ---------------------------------------------------------------------------
+# POST /diff-decision proxy + eval holdout (P3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_forward_diff_decision_injects_repo_root(
+    ingestor, fake_lean_ai
+):
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    resp = await ingestor.forward_diff_decision(
+        "ws-abc",
+        session_id="s1",
+        file_path="/ws/a.py",
+        accepted=False,
+        diff_hash="abc123",
+        note="breaks handler",
+        trace_uuid="uuid-1",
+    )
+    assert resp.get("stored") is True
+
+    assert len(fake_lean_ai.received_diff_decisions) == 1
+    body = fake_lean_ai.received_diff_decisions[0]
+    # Coordinator injects repo_root from registration.
+    assert body["repo_root"] == "/tmp/ws-abc"
+    assert body["session_id"] == "s1"
+    assert body["accepted"] is False
+    assert body["diff_hash"] == "abc123"
+
+
+@pytest.mark.asyncio
+async def test_forward_diff_decision_unknown_workspace(ingestor):
+    with pytest.raises(IngestError, match="Unknown workspace"):
+        await ingestor.forward_diff_decision(
+            "nope",
+            session_id="s1", file_path="/x", accepted=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_forward_diff_decision_disabled_workspace(ingestor, fake_lean_ai):
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    await ingestor.delete_workspace("ws-abc", hard=False)
+    with pytest.raises(IngestError, match="disabled"):
+        await ingestor.forward_diff_decision(
+            "ws-abc",
+            session_id="s1", file_path="/x", accepted=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_holdout_disabled_by_default(ingestor, fake_lean_ai):
+    """Fraction=0.0 must land every row in the main dataset only."""
+    await ingestor.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    for i in range(20):
+        fake_lean_ai.add_pair(pair_kind="plan_rejection", pair_id=f"p-{i}")
+    await ingestor.poll_workspace("ws-abc")
+    main = await ingestor._datasets.get(
+        _dataset_name("ws-abc", "plan_rejection")
+    )
+    assert main is not None
+    assert main.row_count == 20
+    eval_ds = await ingestor._datasets.get(
+        _dataset_name("ws-abc", "plan_rejection") + ":eval"
+    )
+    # :eval dataset should not exist when the feature is off.
+    assert eval_ds is None
+
+
+@pytest.mark.asyncio
+async def test_holdout_splits_rows_deterministically(db, settings, tmp_path):
+    settings.ingestion.holdout_fraction = 0.3
+    settings.ingestion.holdout_salt = "seed-1"
+    fake = FakeLeanAi()
+    transport = httpx.ASGITransport(app=fake.app)
+    http = httpx.AsyncClient(transport=transport, base_url="http://fake")
+    dm = DatasetManager(db, settings)
+    ing = LeanAiIngestor(db, dm, settings, http_client=http)
+    await ing.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    for i in range(200):
+        fake.add_pair(pair_kind="plan_rejection", pair_id=f"p-{i}")
+    await ing.poll_workspace("ws-abc")
+
+    main = await ing._datasets.get(_dataset_name("ws-abc", "plan_rejection"))
+    eval_ds = await ing._datasets.get(
+        _dataset_name("ws-abc", "plan_rejection") + ":eval"
+    )
+    assert main is not None and eval_ds is not None
+    assert main.row_count + eval_ds.row_count == 200
+    # With fraction=0.3 we expect ~60 in eval — allow a ±20 band over 200.
+    assert 40 <= eval_ds.row_count <= 80
+
+    # Determinism is enforced by hashlib inside _row_in_holdout; spot-check
+    # by running the classifier directly rather than polling again (the
+    # fake backend resets ids on clear and the cursor doesn't).
+    for i in range(50):
+        probe_row = {"pair_id": f"p-{i}"}
+        first = ing._row_in_holdout(
+            "ws-abc",
+            _dataset_name("ws-abc", "plan_rejection"),
+            f"p-{i}", probe_row, 0.3,
+        )
+        second = ing._row_in_holdout(
+            "ws-abc",
+            _dataset_name("ws-abc", "plan_rejection"),
+            f"p-{i}", probe_row, 0.3,
+        )
+        assert first == second, f"holdout bucket for p-{i} was not deterministic"
+
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_holdout_split_applies_to_aux_streams_too(db, settings, tmp_path):
+    """Phase2 + memories must also split when holdout_fraction > 0."""
+    settings.ingestion.holdout_fraction = 0.5  # max allowed
+    settings.ingestion.holdout_salt = "s2"
+    fake = FakeLeanAi()
+    transport = httpx.ASGITransport(app=fake.app)
+    http = httpx.AsyncClient(transport=transport, base_url="http://fake")
+    dm = DatasetManager(db, settings)
+    ing = LeanAiIngestor(db, dm, settings, http_client=http)
+    await ing.register_workspace(
+        workspace_id="ws-abc", display_name="x",
+        backend_url="http://fake", repo_root="/tmp/ws-abc",
+        export_key="test-key", registered_by="alice",
+    )
+    for i in range(50):
+        fake.phase2.append({
+            "session_id": f"s-{i}",
+            "trace_uuid": f"uuid-{i}",
+            "task": "t", "scope": "", "observations": [], "scratchpad": "",
+            "journal": "", "exploration_output": "", "file_summary": {},
+            "created_at": f"2026-04-23T12:00:{i:02d}+00:00",
+            "workspace_id": "ws-abc",
+        })
+    await ing.poll_workspace("ws-abc")
+    main = await ing._datasets.get(_aux_dataset_name("ws-abc", STREAM_SFT_PHASE2))
+    eval_ds = await ing._datasets.get(
+        _aux_dataset_name("ws-abc", STREAM_SFT_PHASE2) + ":eval"
+    )
+    assert main is not None and eval_ds is not None
+    assert main.row_count + eval_ds.row_count == 50
+    # Both sides must get some rows with fraction=0.5 and 50 rows.
+    assert main.row_count > 0 and eval_ds.row_count > 0
+
+    await http.aclose()
